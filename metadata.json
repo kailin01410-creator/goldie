@@ -1,0 +1,8 @@
+{
+  "name": "Live Scalp Terminal & MTF Backtester",
+  "description": "High-performance institutional Forex & Gold terminal featuring dual Scalping and Day Trading engines, Strategy Dashboard, Unified Signal Feed, DXY inverse macro correlation engine, live MTF percentage matrices, and paper trading execution.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

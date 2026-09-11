@@ -1,0 +1,31 @@
+{
+  "id": "/",
+  "name": "Live Scalp Terminal & MTF Backtester",
+  "short_name": "ScalpEdge",
+  "description": "High-performance institutional Forex & Gold scalping terminal featuring live multi-timeframe percentage matrices and pre-backtested strategy signals.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#05070B",
+  "theme_color": "#0B0E14",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ],
+  "categories": [
+    "finance",
+    "productivity",
+    "business"
+  ]
+}
