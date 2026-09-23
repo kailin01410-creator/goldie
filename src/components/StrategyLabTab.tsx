@@ -13,7 +13,8 @@ import {
   Zap,
   Activity,
   Sliders,
-  CheckCircle2
+  CheckCircle2,
+  LineChart
 } from 'lucide-react';
 import { useTrading } from '../context/TradingContext';
 import { StrategyId, TradingStyle, IndicatorType } from '../types';
@@ -24,7 +25,10 @@ export const StrategyLabTab: React.FC = () => {
     activeInstrument, 
     tradingStyle: globalTradingStyle, 
     indicatorBacktests, 
-    refreshIndicatorBacktests 
+    refreshIndicatorBacktests,
+    setActiveTab,
+    openStudioForStrategy,
+    openStudioForIndicator
   } = useTrading();
 
   // Local style selection for testing in the lab
@@ -215,6 +219,16 @@ export const StrategyLabTab: React.FC = () => {
             >
               <Play className={`w-3.5 h-3.5 ${isRunning ? 'animate-spin' : ''}`} />
               <span>{isRunning ? 'Running Monte Carlo...' : 'Run Simulation'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => openStudioForStrategy(strategyId)}
+              className="px-3.5 py-2 rounded-lg bg-[#141B28] hover:bg-[#1C2538] text-amber-300 hover:text-white border border-[#232F46] hover:border-amber-500/40 text-xs font-mono font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
+              title="Open this strategy directly in the Live Studio chart"
+            >
+              <LineChart className="w-3.5 h-3.5 text-amber-400" />
+              <span>Live Chart</span>
             </button>
           </div>
         )}
@@ -444,16 +458,27 @@ export const StrategyLabTab: React.FC = () => {
                           {rpt.optimalTimeframe}
                         </td>
                         <td className="py-3 px-3 text-right">
-                          <button
-                            onClick={() => setSelectedIndicator(rpt.indicator)}
-                            className={`px-2.5 py-1 rounded text-[10px] font-bold uppercase transition-all ${
-                              isSelected 
-                                ? 'bg-purple-500 text-white' 
-                                : 'bg-[#0B0E14] text-slate-400 hover:text-white border border-[#1E2638]'
-                            }`}
-                          >
-                            {isSelected ? 'Viewing' : 'Details'}
-                          </button>
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => openStudioForIndicator(rpt.indicator)}
+                              className="px-2 py-1 rounded text-[10px] font-mono font-medium text-cyan-300 hover:text-white bg-[#0B0E14] hover:bg-[#161F30] border border-[#1E2638] hover:border-cyan-500/40 transition-all flex items-center gap-1 cursor-pointer"
+                              title={`Open live interactive candlestick chart with ${rpt.name} pre-applied`}
+                            >
+                              <LineChart className="w-3 h-3 text-cyan-400" />
+                              <span>Live Chart</span>
+                            </button>
+                            <button
+                              onClick={() => setSelectedIndicator(rpt.indicator)}
+                              className={`px-2.5 py-1 rounded text-[10px] font-bold uppercase transition-all cursor-pointer ${
+                                isSelected 
+                                  ? 'bg-purple-500 text-white' 
+                                  : 'bg-[#0B0E14] text-slate-400 hover:text-white border border-[#1E2638]'
+                              }`}
+                            >
+                              {isSelected ? 'Viewing' : 'Details'}
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -472,9 +497,19 @@ export const StrategyLabTab: React.FC = () => {
                   Indicator Rules & Mechanics: {activeIndicatorReport.name}
                 </h3>
               </div>
-              <span className="text-xs font-mono text-emerald-400 font-bold">
-                {activeIndicatorReport.winRate}% Win Rate | {activeIndicatorReport.profitFactor} Profit Factor
-              </span>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-mono text-emerald-400 font-bold">
+                  {activeIndicatorReport.winRate}% Win Rate | {activeIndicatorReport.profitFactor} Profit Factor
+                </span>
+                <button
+                  type="button"
+                  onClick={() => openStudioForIndicator(activeIndicatorReport.indicator)}
+                  className="flex items-center gap-1 px-3 py-1 rounded bg-purple-500 hover:bg-purple-400 text-white font-mono text-xs font-bold transition shadow-sm cursor-pointer"
+                >
+                  <LineChart className="w-3.5 h-3.5" />
+                  <span>Open on Live Chart</span>
+                </button>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 font-sans text-xs">

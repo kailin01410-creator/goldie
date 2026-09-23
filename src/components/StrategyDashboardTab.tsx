@@ -16,7 +16,8 @@ import {
   Info,
   Radio,
   SlidersHorizontal,
-  Volume2
+  Volume2,
+  LineChart
 } from 'lucide-react';
 import { useTrading } from '../context/TradingContext';
 import { StrategyId, TradingStyle } from '../types';
@@ -45,7 +46,8 @@ export const StrategyDashboardTab: React.FC = () => {
     toggleStrategyEnabled, 
     resetStrategyConfig,
     generateSignal,
-    setActiveTab
+    setActiveTab,
+    openStudioForStrategy
   } = useTrading();
 
   const [activeCategory, setActiveCategory] = useState<'ALL' | 'SCALPING' | 'DAY_TRADING' | 'MACRO'>('ALL');
@@ -460,26 +462,38 @@ export const StrategyDashboardTab: React.FC = () => {
                   </div>
 
                   {/* Action row */}
-                  <div className="flex items-center justify-between pt-3 border-t border-[#1E2638]">
+                  <div className="flex items-center justify-between pt-3 border-t border-[#1E2638] flex-wrap gap-2">
                     <span className="text-[11px] font-mono text-slate-400">
                       Status: <span className={isEnabled ? 'text-emerald-400 font-bold' : 'text-slate-500'}>{isEnabled ? 'ACTIVE IN SCANNER' : 'MUTED'}</span>
                     </span>
 
-                    <button
-                      id={`btn-trigger-${strategy.id}`}
-                      onClick={() => handleTriggerStrategySignal(
-                        strategy.id, 
-                        strategy.tradingStyle
-                      )}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition active:scale-95 cursor-pointer ${
-                        isJustGenerated
-                          ? 'bg-emerald-500 text-black'
-                          : 'bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500 hover:text-black'
-                      }`}
-                    >
-                      {isJustGenerated ? <Check className="w-3.5 h-3.5" /> : <Zap className="w-3.5 h-3.5" />}
-                      <span>{isJustGenerated ? 'Signal Fired!' : 'Generate Signal Now'}</span>
-                    </button>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => openStudioForStrategy(strategy.id)}
+                        className="flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-mono font-medium bg-[#141B28] hover:bg-[#1C2538] text-amber-300 border border-[#232F46] hover:border-amber-500/40 transition cursor-pointer"
+                        title={`Open live interactive chart with ${strategy.name} pre-applied`}
+                      >
+                        <LineChart className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Live Chart</span>
+                      </button>
+
+                      <button
+                        id={`btn-trigger-${strategy.id}`}
+                        onClick={() => handleTriggerStrategySignal(
+                          strategy.id, 
+                          strategy.tradingStyle
+                        )}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition active:scale-95 cursor-pointer ${
+                          isJustGenerated
+                            ? 'bg-emerald-500 text-black'
+                            : 'bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500 hover:text-black'
+                        }`}
+                      >
+                        {isJustGenerated ? <Check className="w-3.5 h-3.5" /> : <Zap className="w-3.5 h-3.5" />}
+                        <span>{isJustGenerated ? 'Signal Fired!' : 'Trigger Signal'}</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
               );

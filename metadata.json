@@ -1,6 +1,6 @@
 {
   "name": "Live Scalp Terminal & MTF Backtester",
-  "description": "High-performance institutional Forex & Gold terminal featuring dual Scalping and Day Trading engines, Strategy Dashboard, Unified Signal Feed, DXY inverse macro correlation engine, live MTF percentage matrices, and paper trading execution.",
+  "description": "Premier GoldFlow Dashboard for real-time Gold (XAU/USD) live charting, market overview, mathematical technical analysis, order-flow transparency, and options GEX metrics.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

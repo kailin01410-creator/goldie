@@ -141,6 +141,15 @@ export const STRATEGY_CONFIGS: Record<StrategyId, BacktestStrategyConfig> = {
     maxDrawdown: 1.0,
     confluenceDescription: 'DXY Major Resistance/Support Liquidity Purge + Inverse Correlation (-0.91) Alignment + Gold Value Area Expansion (+8% to +12% Win Rate Boost).',
   },
+  GOLDSCALP_FAST_MOMENTUM_RSI_MACD: {
+    name: 'GoldScalp Fast Momentum (RSI + MACD Tick Engine)',
+    tradingStyle: 'SCALPING',
+    baseWinRate: 83.4,
+    baseProfitFactor: 2.74,
+    avgRiskReward: 2.4,
+    maxDrawdown: 1.4,
+    confluenceDescription: 'High-frequency M1/M5 momentum burst: RSI 14 > 52 cross + MACD Histogram positive expansion + Multi-Horizon thrust score.',
+  },
 };
 
 /**

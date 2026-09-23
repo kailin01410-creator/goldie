@@ -172,9 +172,12 @@ export const InstitutionalConfluenceTab: React.FC = () => {
                 onChange={(e) => setConfig({ ...config, contextTimeframe: e.target.value as TimeframeId })}
                 className="w-full bg-[#090D15] border border-slate-700 rounded px-2.5 py-1.5 text-slate-200 text-xs"
               >
-                <option value="1h">1H (1 Hour - Recommended)</option>
-                <option value="4h">4H (4 Hours)</option>
-                <option value="15m">15M (15 Min for Scalping)</option>
+                <option value="1d">D1 (Daily Macro Trend)</option>
+                <option value="4h">4H (4 Hours - Swing Structure)</option>
+                <option value="2h">2H (2 Hours - Half-Day Bias)</option>
+                <option value="1h">1H (1 Hour - Standard Recommended)</option>
+                <option value="30m">30M (30 Min - Session Structure)</option>
+                <option value="15m">15M (15 Min - Fast Scalping Context)</option>
               </select>
             </div>
 
@@ -185,9 +188,11 @@ export const InstitutionalConfluenceTab: React.FC = () => {
                 onChange={(e) => setConfig({ ...config, setupTimeframe: e.target.value as TimeframeId })}
                 className="w-full bg-[#090D15] border border-slate-700 rounded px-2.5 py-1.5 text-slate-200 text-xs"
               >
+                <option value="1h">1H (1 Hour - High Timeframe Patterns)</option>
+                <option value="30m">30M (30 Min - Order Block Confluence)</option>
                 <option value="15m">15M (15 Min - Recommended)</option>
-                <option value="5m">5M (5 Min)</option>
-                <option value="1h">1H (1 Hour)</option>
+                <option value="10m">10M (10 Min - Refined Levels)</option>
+                <option value="5m">5M (5 Min - Intraday Setup)</option>
               </select>
             </div>
 
@@ -198,9 +203,11 @@ export const InstitutionalConfluenceTab: React.FC = () => {
                 onChange={(e) => setConfig({ ...config, entryTimeframe: e.target.value as TimeframeId })}
                 className="w-full bg-[#090D15] border border-slate-700 rounded px-2.5 py-1.5 text-slate-200 text-xs"
               >
-                <option value="5m">5M (5 Min - Recommended)</option>
-                <option value="1m">1M (1 Min Fast Execution)</option>
-                <option value="15m">15M (15 Min Swing)</option>
+                <option value="15m">15M (15 Min Swing Trigger)</option>
+                <option value="5m">5M (5 Min - Recommended Entry)</option>
+                <option value="3m">3M (3 Min - Rapid Confirmation)</option>
+                <option value="2m">2M (2 Min - Low Noise Execution)</option>
+                <option value="1m">1M (1 Min - High Frequency Order Flow)</option>
               </select>
             </div>
 
@@ -668,7 +675,7 @@ export const InstitutionalConfluenceTab: React.FC = () => {
 
         <div className="flex items-center gap-2 self-end sm:self-center">
           <span className="px-2.5 py-1 rounded bg-slate-800 text-slate-300 text-[11px] border border-slate-700">
-            XM Spread: {goldSpreadPips.toFixed(1)} Pips
+            Spread: {goldSpreadPips.toFixed(1)} Pips
           </span>
         </div>
       </div>

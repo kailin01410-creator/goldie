@@ -50,7 +50,10 @@ export const TradingSessionHeaderCard: React.FC<TradingSessionHeaderCardProps> =
     isHighLiquidityWindow,
     activeStrategyRecommendation,
     activeStrategyFilterHint,
-    isOverlapActive
+    isOverlapActive,
+    isMarketClosed,
+    marketClosureReason,
+    timeUntilMarketOpenFormatted
   } = currentSession;
 
   const sessionItems = [
@@ -90,7 +93,9 @@ export const TradingSessionHeaderCard: React.FC<TradingSessionHeaderCardProps> =
 
           {/* Active Highlight Badge */}
           <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono font-bold border transition-all ${
-            isOverlapActive
+            isMarketClosed
+              ? 'bg-rose-500/20 text-rose-300 border-rose-500/50 shadow-sm shadow-rose-500/20'
+              : isOverlapActive
               ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50 shadow-sm shadow-emerald-500/20'
               : primaryActiveSessionId === 'NEW_YORK'
               ? 'bg-amber-500/20 text-amber-300 border-amber-500/50 shadow-sm shadow-amber-500/20'
@@ -104,10 +109,17 @@ export const TradingSessionHeaderCard: React.FC<TradingSessionHeaderCardProps> =
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-current opacity-75" />
               <span className="relative inline-flex rounded-full h-2 w-2 bg-current" />
             </span>
-            <span>{primaryActiveFlag} {primaryActiveName.toUpperCase()}</span>
-            {isHighLiquidityWindow && (
+            <span>
+              {isMarketClosed ? `🛑 MARKET CLOSED (${primaryActiveFlag} ${primaryActiveName.toUpperCase()})` : `${primaryActiveFlag} ${primaryActiveName.toUpperCase()}`}
+            </span>
+            {isHighLiquidityWindow && !isMarketClosed && (
               <span className="hidden md:inline px-1.5 py-0.2 rounded bg-black/40 text-[10px] text-amber-300 ml-1">
                 PEAK VOLUME
+              </span>
+            )}
+            {isMarketClosed && timeUntilMarketOpenFormatted && (
+              <span className="hidden md:inline px-1.5 py-0.2 rounded bg-black/40 text-[10px] text-rose-300 ml-1">
+                OPENS {timeUntilMarketOpenFormatted}
               </span>
             )}
           </div>
@@ -278,6 +290,27 @@ export const TradingSessionHeaderCard: React.FC<TradingSessionHeaderCardProps> =
           );
         })}
       </div>
+
+      {/* Market Closed Banner Notice */}
+      {isMarketClosed && (
+        <div className="mt-3 p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/40 text-rose-300 text-xs font-mono flex flex-col sm:flex-row sm:items-center justify-between gap-3 relative z-10">
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-rose-400 animate-ping shrink-0" />
+            <span className="font-bold">GLOBAL MARKET CLOSED:</span>
+            <span className="text-slate-300">{marketClosureReason || 'Interbank Weekend Close'}. Synthetic drift frozen. All timeframes (1m, 5m, 15m, 1h, 4h, 1d) & technical metrics remain fully rendered.</span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold">
+              ALL TIMEFRAMES VISIBLE
+            </span>
+            {timeUntilMarketOpenFormatted && (
+              <span className="px-2 py-0.5 rounded bg-rose-500/20 text-rose-200 border border-rose-500/30 text-[10px] font-bold">
+                Reopens: {timeUntilMarketOpenFormatted}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Immediate Strategy Filter Context Strip */}
       {!compact && (

@@ -304,11 +304,7 @@ ${signal.confluences.slice(0, 3).map(c => `• ${c}`).join('\n')}`;
               onChange={e => setFilterSymbol(e.target.value)}
               className="bg-[#141B28] border border-[#1E2638] text-slate-200 text-xs rounded-md px-2 py-1 focus:outline-none focus:border-amber-500"
             >
-              <option value="ALL">All Symbols</option>
               <option value="XAU/USD">Gold (XAU/USD)</option>
-              <option value="EUR/USD">EUR/USD</option>
-              <option value="GBP/USD">GBP/USD</option>
-              <option value="BTC/USD">Bitcoin</option>
             </select>
 
             {/* Strategy Style Filter */}

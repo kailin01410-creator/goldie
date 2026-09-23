@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { 
   Instrument, 
   Candle, 
@@ -10,13 +10,19 @@ import {
   RiskSettings, 
   StrategyId,
   NetworkConnectivityStatus,
+  BrokerTier,
   XmBrokerTier,
   TradingStyle,
   IndicatorType,
   IndicatorBacktestReport,
-  StrategyPersistenceConfig
+  StrategyPersistenceConfig,
+  AngelProject,
+  GoldMemoryItem
 } from '../types';
+import { INITIAL_ANGEL_PROJECTS } from '../data/angelProjects';
+import { INITIAL_GOLD_MEMORIES } from '../data/goldMemoryData';
 import { INITIAL_INSTRUMENTS } from '../data/instruments';
+import { getDominionTimeframe } from '../data/timeframes';
 import { generateCandles, calculateMultiTimeframeMetrics } from '../utils/technicalAnalysis';
 import { generatePreBacktestedScalp, runIndicatorBacktestMatrix } from '../utils/backtester';
 import { getDetailedDxyCorrelation, DxyCorrelationDetails } from '../modules/macroFilters';
@@ -26,49 +32,63 @@ import {
   getCurrentSessionDetails 
 } from '../utils/sessionManager';
 
-export interface XmPresetInfo {
+export interface BrokerPresetInfo {
   tier: XmBrokerTier;
   label: string;
   spreadPips: number;
   spreadDollars: number;
+  leverage: number;
   description: string;
   recommendedFor: string;
 }
 
-export const XM_BROKER_PRESETS: Record<XmBrokerTier, XmPresetInfo> = {
-  XM_ULTRA_LOW: {
-    tier: 'XM_ULTRA_LOW',
-    label: 'XM Ultra Low',
+export type XmPresetInfo = BrokerPresetInfo;
+
+export const BROKER_PRESETS: Record<string, BrokerPresetInfo> = {
+  STANDARD: {
+    tier: 'STANDARD',
+    label: 'Standard Account',
+    spreadPips: 3.5,
+    spreadDollars: 0.35,
+    leverage: 1000,
+    description: 'Standard Account with 1000:1 leverage & typical 3.5 pip ($0.35/oz) spread',
+    recommendedFor: 'Standard account (1000:1 leverage default)',
+  },
+  ULTRA_LOW: {
+    tier: 'ULTRA_LOW',
+    label: 'Raw / Ultra-Low',
     spreadPips: 3.0,
     spreadDollars: 0.30,
-    description: 'XM Ultra Low Standard / Micro (Typical: 2.8 - 3.2 pips / ~$0.30 per oz)',
-    recommendedFor: 'XM Demo standard accounts (Zero commission)',
+    leverage: 1000,
+    description: 'Ultra Low Spread Account (Typical: 2.8 - 3.2 pips / ~$0.30 per oz)',
+    recommendedFor: 'Ultra-Low accounts (Zero commission)',
   },
-  XM_STANDARD: {
-    tier: 'XM_STANDARD',
-    label: 'XM Standard',
-    spreadPips: 4.0,
-    spreadDollars: 0.40,
-    description: 'XM Classic Standard Account (Typical: 3.5 - 4.5 pips / ~$0.40 per oz)',
-    recommendedFor: 'Classic accounts with deposit bonus structures',
-  },
-  XM_MICRO: {
-    tier: 'XM_MICRO',
-    label: 'XM Micro',
+  MICRO: {
+    tier: 'MICRO',
+    label: 'Micro Account',
     spreadPips: 16.0,
     spreadDollars: 1.60,
-    description: 'XM Micro Account (Micro-contract pricing ~16.0 pips / $1.60 per oz)',
+    leverage: 1000,
+    description: 'Micro Account (Micro-contract pricing ~16.0 pips / $1.60 per oz)',
     recommendedFor: 'Micro-lots accounts',
   },
   CUSTOM: {
     tier: 'CUSTOM',
-    label: 'Custom XM Demo',
-    spreadPips: 3.0,
-    spreadDollars: 0.30,
-    description: 'Calibrated to match exact spread on your active XM MT4/MT5 demo terminal',
+    label: 'Custom Broker Spread',
+    spreadPips: 3.5,
+    spreadDollars: 0.35,
+    leverage: 1000,
+    description: 'Calibrated to match exact spread on your active MT4/MT5 terminal',
     recommendedFor: 'Precision matching to live broker quotes',
   },
 };
+
+// Backwards compatibility mappings
+BROKER_PRESETS['XM_STANDARD'] = BROKER_PRESETS['STANDARD'];
+BROKER_PRESETS['XM_ULTRA_LOW'] = BROKER_PRESETS['ULTRA_LOW'];
+BROKER_PRESETS['XM_MICRO'] = BROKER_PRESETS['MICRO'];
+
+export const XM_BROKER_PRESETS = BROKER_PRESETS;
 
 interface TradingContextType {
   // Market & Instruments
@@ -89,13 +109,21 @@ interface TradingContextType {
   goldDataSource: string;
   lastGoldSyncTime: number;
   goldApiKey: string;
+  goldApiNotice: string | null;
+  marketStatus: 'OPEN' | 'CLOSED';
+  isMarketClosed: boolean;
+  marketClosureReason: string | null;
   setGoldApiKey: (key: string) => void;
   refreshGoldPrice: () => Promise<void>;
+  testGoldApiKey: (keyToCheck?: string) => Promise<{ success: boolean; status: string; message: string; price?: number; httpStatus?: number; error?: string }>;
+  calibrateGoldQuote: (price: number, changePercent?: number, openPrice?: number) => void;
 
-  // XM Broker Spread Configuration
-  xmBrokerTier: XmBrokerTier;
+  // Broker Spread Configuration
+  brokerTier: BrokerTier;
+  xmBrokerTier: BrokerTier;
   goldSpreadPips: number;
-  updateXmSpread: (tier: XmBrokerTier, customPips?: number) => void;
+  updateBrokerSpread: (tier: BrokerTier, customPips?: number) => void;
+  updateXmSpread: (tier: BrokerTier, customPips?: number) => void;
   isXmModalOpen: boolean;
   setIsXmModalOpen: (open: boolean) => void;
 
@@ -149,6 +177,14 @@ interface TradingContextType {
   isDownloadModalOpen: boolean;
   setIsDownloadModalOpen: (open: boolean) => void;
 
+  // GoldAPI Manual Key Modal
+  isGoldKeyModalOpen: boolean;
+  setIsGoldKeyModalOpen: (open: boolean) => void;
+
+  // Settings Modal State
+  isSettingsModalOpen: boolean;
+  setIsSettingsModalOpen: (open: boolean) => void;
+
   // Strategy Dashboard & Persistence State
   strategyConfig: StrategyPersistenceConfig;
   updateStrategyConfig: (patch: Partial<StrategyPersistenceConfig>) => void;
@@ -167,9 +203,32 @@ interface TradingContextType {
   sessionSimulationOverride: TradingSessionId | 'LIVE';
   setSessionSimulationOverride: (override: TradingSessionId | 'LIVE') => void;
 
-  // Navigation
+  // Navigation & Unified Studio Target
   activeTab: string;
   setActiveTab: (tab: string) => void;
+  studioTargetStrategy: StrategyId | null;
+  studioTargetIndicator: IndicatorType | null;
+  openStudioForStrategy: (strategyId: StrategyId) => void;
+  openStudioForIndicator: (indicatorId: IndicatorType) => void;
+  clearStudioTargets: () => void;
+
+  // ANGEL AI Companion & Adaptive Projects Engine
+  projects: AngelProject[];
+  activeProject: AngelProject;
+  setActiveProject: (project: AngelProject) => void;
+  addProject: (project: Omit<AngelProject, 'id' | 'createdDate'>) => AngelProject;
+  updateProject: (project: AngelProject) => void;
+  deleteProject: (id: string) => void;
+  isAngelModalOpen: boolean;
+  setIsAngelModalOpen: (open: boolean) => void;
+
+  // Gold Memory Data & Knowledge Base
+  goldMemories: GoldMemoryItem[];
+  addGoldMemory: (item: Omit<GoldMemoryItem, 'id' | 'createdAt' | 'updatedAt'>) => GoldMemoryItem;
+  updateGoldMemory: (item: GoldMemoryItem) => void;
+  deleteGoldMemory: (id: string) => void;
+  toggleGoldMemoryActive: (id: string) => void;
+  clearAllGoldMemories: () => void;
 }
 
 const TradingContext = createContext<TradingContextType | undefined>(undefined);
@@ -199,6 +258,7 @@ export const DEFAULT_STRATEGY_CONFIG: StrategyPersistenceConfig = {
     DAY_BREAKOUT_LONDON_PULLBACK: true,
     DAY_MULTI_INDICATOR_CONFLUENCE: true,
     DXY_GOLD_INVERSE_CORRELATION: true,
+    GOLDSCALP_FAST_MOMENTUM_RSI_MACD: true,
   },
   minConfluenceScore: 75,
   minWinRateThreshold: 75,
@@ -217,13 +277,15 @@ export const DEFAULT_STRATEGY_CONFIG: StrategyPersistenceConfig = {
 const DEFAULT_ADMIN_PROFILE: AdminProfile = {
   maxDailyDrawdownPercent: 3.5,
   defaultLotSize: 1.0,
-  accountLeverage: 200, // 1:200
+  accountLeverage: 1000, // 1000:1 Standard Account
   riskPerTradePercent: 1.5,
   slippageSimulationPips: 0.2,
   autoBreakevenAtR: 1.0,
   goldApiKey: '',
-  xmBrokerTier: 'XM_ULTRA_LOW',
-  xmGoldSpreadPips: 3.0,
+  brokerTier: 'STANDARD',
+  goldSpreadPips: 3.5,
+  xmBrokerTier: 'STANDARD',
+  xmGoldSpreadPips: 3.5,
 };
 
 const ensureUniqueSignals = (signals: ScalpSignal[]): ScalpSignal[] => {
@@ -258,13 +320,30 @@ const ensureUniquePositions = (positions: PaperPosition[]): PaperPosition[] => {
 };
 
 export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Navigation
-  const [activeTab, setActiveTab] = useState<string>('scalp'); // 'scalp' | 'mtf' | 'chart' | 'orders' | 'strategy_lab' | 'admin'
+  // Navigation - default directly to live gold chart
+  const [activeTab, setActiveTab] = useState<string>('chart'); // 'chart' | 'goldscalp' | 'scalp' | 'mtf' | 'orders' | 'strategy_lab' | 'settings'
+  const [studioTargetStrategy, setStudioTargetStrategy] = useState<StrategyId | null>(null);
+  const [studioTargetIndicator, setStudioTargetIndicator] = useState<IndicatorType | null>(null);
+
+  const openStudioForStrategy = useCallback((strategyId: StrategyId) => {
+    setStudioTargetStrategy(strategyId);
+    setActiveTab('chart');
+  }, []);
+
+  const openStudioForIndicator = useCallback((indicatorId: IndicatorType) => {
+    setStudioTargetIndicator(indicatorId);
+    setActiveTab('chart');
+  }, []);
+
+  const clearStudioTargets = useCallback(() => {
+    setStudioTargetStrategy(null);
+    setStudioTargetIndicator(null);
+  }, []);
 
   // Instruments & Market state
   const [instruments, setInstruments] = useState<Instrument[]>(INITIAL_INSTRUMENTS);
   const [activeSymbol, setActiveSymbolState] = useState<string>('XAU/USD');
-  const [timeframe, setTimeframe] = useState<TimeframeId>('5m');
+  const [timeframe, setTimeframeState] = useState<TimeframeId>('5m');
   const [isLiveFeedActive, setIsLiveFeedActive] = useState<boolean>(true);
   const [tickSpeedMs, setTickSpeedMs] = useState<number>(1000);
   const [lastTickTime, setLastTickTime] = useState<number>(Date.now());
@@ -301,9 +380,12 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   // GoldAPI / Live Data State
   const [goldDataSource, setGoldDataSource] = useState<string>('Live Institutional Spot Feed');
+  const [goldApiNotice, setGoldApiNotice] = useState<string | null>(null);
   const [lastGoldSyncTime, setLastGoldSyncTime] = useState<number>(Date.now());
+  const [marketStatus, setMarketStatus] = useState<'OPEN' | 'CLOSED'>('CLOSED');
+  const [marketClosureReason, setMarketClosureReason] = useState<string | null>('Global Weekend Close');
   const [goldApiKey, setGoldApiKeyState] = useState<string>(() => {
-    return localStorage.getItem(GOLD_API_KEY_STORAGE) || '';
+    return localStorage.getItem(GOLD_API_KEY_STORAGE) || 'goldapi-5403d0e1a666c2c6afa359500f9588c3-io';
   });
 
   // Internet Connection & Network Monitoring
@@ -320,17 +402,25 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return instruments.find(i => i.symbol === activeSymbol) || instruments[0];
   }, [instruments, activeSymbol]);
 
-  // Historical Candles
+  // Historical Candles (200 bars depth for MT5-grade smooth zoom & pan)
   const [candles, setCandles] = useState<Candle[]>(() => {
-    return generateCandles(INITIAL_INSTRUMENTS[0].currentPrice, 70, 0.0018, '5m');
+    return generateCandles(INITIAL_INSTRUMENTS[0].currentPrice, 200, undefined, '5m');
   });
 
   // Regenerate candles when symbol or timeframe changes
   const setActiveSymbol = useCallback((symbol: string) => {
     setActiveSymbolState(symbol);
     const target = instruments.find(i => i.symbol === symbol) || instruments[0];
-    setCandles(generateCandles(target.currentPrice, 70, 0.0018, timeframe));
-  }, [instruments, timeframe]);
+    const effectivePrice = (symbol === activeSymbol && realMarketPriceRef.current) ? realMarketPriceRef.current : target.currentPrice;
+    setCandles(generateCandles(effectivePrice, 200, undefined, timeframe));
+  }, [instruments, timeframe, activeSymbol]);
+
+  const setTimeframe = useCallback((tf: TimeframeId) => {
+    setTimeframeState(tf);
+    const target = instruments.find(i => i.symbol === activeSymbol) || instruments[0];
+    const effectivePrice = realMarketPriceRef.current || target.currentPrice;
+    setCandles(generateCandles(effectivePrice, 200, undefined, tf));
+  }, [instruments, activeSymbol]);
 
   // Strategy Dashboard & Persistence Configuration
   const [strategyConfig, setStrategyConfig] = useState<StrategyPersistenceConfig>(() => {
@@ -495,7 +585,17 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [adminProfile, setAdminProfile] = useState<AdminProfile>(() => {
     try {
       const saved = localStorage.getItem(ADMIN_STORAGE_KEY);
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.accountLeverage === 200 || !parsed.accountLeverage) {
+          parsed.accountLeverage = 1000;
+        }
+        if (parsed.xmBrokerTier === 'XM_ULTRA_LOW' || !parsed.xmBrokerTier) {
+          parsed.xmBrokerTier = 'XM_STANDARD';
+          parsed.xmGoldSpreadPips = 3.5;
+        }
+        return parsed;
+      }
     } catch {
       // ignore
     }
@@ -505,28 +605,205 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [isAndroidInstallModalOpen, setIsAndroidInstallModalOpen] = useState<boolean>(false);
   const [isXmModalOpen, setIsXmModalOpen] = useState<boolean>(false);
   const [isDownloadModalOpen, setIsDownloadModalOpen] = useState<boolean>(false);
+  const [isGoldKeyModalOpen, setIsGoldKeyModalOpen] = useState<boolean>(false);
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState<boolean>(false);
+  const [isAngelModalOpen, setIsAngelModalOpen] = useState<boolean>(false);
 
-  // XM Broker spread state
-  const [xmBrokerTier, setXmBrokerTier] = useState<XmBrokerTier>(() => {
+  // ANGEL Adaptive Projects State & Persistence
+  const ANGEL_PROJECTS_STORAGE_KEY = 'scalp_angel_projects_v2';
+  const ANGEL_ACTIVE_PROJECT_KEY = 'scalp_angel_active_project_id_v2';
+
+  const [projects, setProjects] = useState<AngelProject[]>(() => {
+    try {
+      const saved = localStorage.getItem(ANGEL_PROJECTS_STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return INITIAL_ANGEL_PROJECTS;
+  });
+
+  const [activeProjectId, setActiveProjectId] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem(ANGEL_ACTIVE_PROJECT_KEY);
+      if (saved) return saved;
+    } catch {}
+    return INITIAL_ANGEL_PROJECTS[0].id;
+  });
+
+  const activeProject = useMemo(() => {
+    return projects.find(p => p.id === activeProjectId) || projects[0] || INITIAL_ANGEL_PROJECTS[0];
+  }, [projects, activeProjectId]);
+
+  const setActiveProject = useCallback((proj: AngelProject) => {
+    setActiveProjectId(proj.id);
+    try {
+      localStorage.setItem(ANGEL_ACTIVE_PROJECT_KEY, proj.id);
+    } catch {}
+  }, []);
+
+  const addProject = useCallback((newProjData: Omit<AngelProject, 'id' | 'createdDate'>) => {
+    const newProject: AngelProject = {
+      ...newProjData,
+      id: `proj-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      createdDate: new Date().toISOString().split('T')[0],
+    };
+    setProjects(prev => {
+      const updated = [newProject, ...prev];
+      try {
+        localStorage.setItem(ANGEL_PROJECTS_STORAGE_KEY, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+    setActiveProjectId(newProject.id);
+    try {
+      localStorage.setItem(ANGEL_ACTIVE_PROJECT_KEY, newProject.id);
+    } catch {}
+    return newProject;
+  }, []);
+
+  const updateProject = useCallback((updatedProject: AngelProject) => {
+    setProjects(prev => {
+      const updated = prev.map(p => p.id === updatedProject.id ? updatedProject : p);
+      try {
+        localStorage.setItem(ANGEL_PROJECTS_STORAGE_KEY, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+  }, []);
+
+  const deleteProject = useCallback((id: string) => {
+    setProjects(prev => {
+      const filtered = prev.filter(p => p.id !== id);
+      const finalProjects = filtered.length > 0 ? filtered : INITIAL_ANGEL_PROJECTS;
+      try {
+        localStorage.setItem(ANGEL_PROJECTS_STORAGE_KEY, JSON.stringify(finalProjects));
+      } catch {}
+      return finalProjects;
+    });
+    if (activeProjectId === id) {
+      setActiveProjectId(INITIAL_ANGEL_PROJECTS[0].id);
+      try {
+        localStorage.setItem(ANGEL_ACTIVE_PROJECT_KEY, INITIAL_ANGEL_PROJECTS[0].id);
+      } catch {}
+    }
+  }, [activeProjectId]);
+
+  // Gold Memory Data & Knowledge Base State
+  const ANGEL_GOLD_MEMORIES_STORAGE_KEY = 'angel_gold_memory_data_v1';
+
+  const [goldMemories, setGoldMemories] = useState<GoldMemoryItem[]>(() => {
+    try {
+      const saved = localStorage.getItem(ANGEL_GOLD_MEMORIES_STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          // Remove old mock demo cards so user has a clean slate
+          const filtered = parsed.filter((m: GoldMemoryItem) => 
+            !['mem-xau-playbook', 'mem-dominion-execution', 'mem-macro-dxy-correlation', 'mem-key-price-milestones'].includes(m.id)
+          );
+          return filtered;
+        }
+      }
+    } catch {}
+    return INITIAL_GOLD_MEMORIES;
+  });
+
+  const addGoldMemory = useCallback((itemData: Omit<GoldMemoryItem, 'id' | 'createdAt' | 'updatedAt'>) => {
+    const newItem: GoldMemoryItem = {
+      ...itemData,
+      id: `mem-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    setGoldMemories(prev => {
+      const updated = [newItem, ...prev];
+      try {
+        localStorage.setItem(ANGEL_GOLD_MEMORIES_STORAGE_KEY, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+    return newItem;
+  }, []);
+
+  const updateGoldMemory = useCallback((updated: GoldMemoryItem) => {
+    setGoldMemories(prev => {
+      const updatedList = prev.map(m => m.id === updated.id ? { ...updated, updatedAt: Date.now() } : m);
+      try {
+        localStorage.setItem(ANGEL_GOLD_MEMORIES_STORAGE_KEY, JSON.stringify(updatedList));
+      } catch {}
+      return updatedList;
+    });
+  }, []);
+
+  const deleteGoldMemory = useCallback((id: string) => {
+    setGoldMemories(prev => {
+      const filtered = prev.filter(m => m.id !== id);
+      try {
+        localStorage.setItem(ANGEL_GOLD_MEMORIES_STORAGE_KEY, JSON.stringify(filtered));
+      } catch {}
+      return filtered;
+    });
+  }, []);
+
+  const toggleGoldMemoryActive = useCallback((id: string) => {
+    setGoldMemories(prev => {
+      const updated = prev.map(m => m.id === id ? { ...m, isActive: !m.isActive, updatedAt: Date.now() } : m);
+      try {
+        localStorage.setItem(ANGEL_GOLD_MEMORIES_STORAGE_KEY, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+  }, []);
+
+  const clearAllGoldMemories = useCallback(() => {
+    setGoldMemories([]);
+    try {
+      localStorage.removeItem(ANGEL_GOLD_MEMORIES_STORAGE_KEY);
+    } catch {}
+  }, []);
+
+  // Broker spread state
+  const [brokerTier, setBrokerTier] = useState<BrokerTier>(() => {
     const saved = localStorage.getItem(XM_TIER_STORAGE_KEY);
-    return (saved as XmBrokerTier) || 'XM_ULTRA_LOW';
+    if (!saved || saved === 'XM_ULTRA_LOW' || saved === 'ULTRA_LOW') return 'STANDARD';
+    if (saved === 'XM_STANDARD' || saved === 'STANDARD') return 'STANDARD';
+    if (saved === 'XM_MICRO' || saved === 'MICRO') return 'MICRO';
+    if (saved === 'CUSTOM') return 'CUSTOM';
+    return 'STANDARD';
   });
 
   const [goldSpreadPips, setGoldSpreadPips] = useState<number>(() => {
     const saved = localStorage.getItem(XM_SPREAD_STORAGE_KEY);
-    return saved ? parseFloat(saved) : 3.0;
+    if (!saved || saved === '3' || saved === '3.0') return 3.5;
+    return saved ? parseFloat(saved) : 3.5;
   });
 
-  // Dynamic XM Broker spread calibration
-  const updateXmSpread = useCallback((tier: XmBrokerTier, customPips?: number) => {
+  // Dynamic Broker spread calibration
+  const updateBrokerSpread = useCallback((tier: BrokerTier, customPips?: number) => {
     const targetPips = tier === 'CUSTOM' && customPips !== undefined
       ? customPips
-      : (XM_BROKER_PRESETS[tier]?.spreadPips ?? 3.0);
+      : (BROKER_PRESETS[tier]?.spreadPips ?? 3.5);
 
-    setXmBrokerTier(tier);
+    setBrokerTier(tier);
     setGoldSpreadPips(targetPips);
     localStorage.setItem(XM_TIER_STORAGE_KEY, tier);
     localStorage.setItem(XM_SPREAD_STORAGE_KEY, targetPips.toString());
+
+    // Also update leverage if preset defines one
+    setAdminProfile(prev => {
+      const updated = {
+        ...prev,
+        brokerTier: tier,
+        goldSpreadPips: targetPips,
+        xmBrokerTier: tier,
+        xmGoldSpreadPips: targetPips,
+        accountLeverage: BROKER_PRESETS[tier]?.leverage || prev.accountLeverage,
+      };
+      localStorage.setItem(ADMIN_STORAGE_KEY, JSON.stringify(updated));
+      return updated;
+    });
 
     setInstruments(prev => prev.map(inst => {
       if (inst.symbol === 'XAU/USD') {
@@ -542,6 +819,12 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       return inst;
     }));
   }, []);
+
+  const updateXmSpread = updateBrokerSpread;
+  const xmBrokerTier = brokerTier;
+
+  // Real-time authoritative market spot anchor to prevent synthetic random-walk drift
+  const realMarketPriceRef = useRef<number | null>(null);
 
   // Trading Methodology: Scalping vs Day Trading
   const [tradingStyle, setTradingStyleState] = useState<TradingStyle>('SCALPING');
@@ -724,7 +1007,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
   }, [handleOfflineDetected, testConnectivity]);
 
-  // Fetch live Gold price from backend proxy (GoldAPI.io + Live Physical Spot)
+  // Fetch live Gold price from backend proxy (GoldAPI.io + Live Physical Spot + COMEX)
   const refreshGoldPrice = useCallback(async () => {
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       handleOfflineDetected();
@@ -738,31 +1021,49 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         headers['x-access-token'] = keyToUse;
       }
 
-      const res = await fetch(`/api/gold-price?metal=XAU&currency=USD&spread=${goldSpreadPips}&t=` + Date.now(), {
+      const base = activeInstrument.baseCurrency || 'XAU';
+      const quote = activeInstrument.quoteCurrency || 'USD';
+      const res = await fetch(`/api/gold-price?metal=${encodeURIComponent(base)}&currency=${encodeURIComponent(quote)}&spread=${goldSpreadPips}&t=` + Date.now(), {
         headers,
         cache: 'no-store',
       });
 
       if (res.ok) {
         const data = await res.json();
-        if (data.success && data.price) {
-          const livePrice = Number(data.price);
+        if (data.marketStatus) {
+          setMarketStatus(data.marketStatus);
+          if (data.marketClosureReason) {
+            setMarketClosureReason(data.marketClosureReason);
+          }
+        }
+        if (data.success && (data.rawPrice || data.price)) {
+          // Pure raw market price matching live market settlement strictly
+          const livePrice = Number(data.rawPrice || data.price);
+          realMarketPriceRef.current = livePrice;
           setInstruments(prev => prev.map(inst => {
-            if (inst.symbol === 'XAU/USD') {
-              const spreadDollars = goldSpreadPips / inst.pipMultiplier;
-              const halfSpread = spreadDollars / 2;
-              const newBid = Number((livePrice - halfSpread).toFixed(2));
-              const newAsk = Number((livePrice + halfSpread).toFixed(2));
+            if (inst.symbol === activeInstrument.symbol) {
+              // Raw market quotes: spread decoupled
+              const newBid = livePrice;
+              const newAsk = livePrice;
+              const openPrice = data.open24h ? Number(data.open24h) : (inst.open24h || livePrice * 0.998);
+              const finalChangePercent = data.changePercent !== undefined
+                ? Number(data.changePercent)
+                : Number((((livePrice - openPrice) / openPrice) * 100).toFixed(2));
+              const finalChangePips = data.change !== undefined
+                ? Number((data.change * inst.pipMultiplier).toFixed(1))
+                : Number(((livePrice - openPrice) * inst.pipMultiplier).toFixed(1));
+
               return {
                 ...inst,
                 currentPrice: livePrice,
+                open24h: openPrice,
                 bid: newBid,
                 ask: newAsk,
-                spreadPips: goldSpreadPips,
+                spreadPips: 0.0,
                 high24h: data.high24h ? Number(data.high24h) : Math.max(inst.high24h, livePrice),
                 low24h: data.low24h ? Number(data.low24h) : Math.min(inst.low24h, livePrice),
-                change24h: data.changePercent !== undefined ? Number(data.changePercent) : inst.change24h,
-                change24hPips: data.change ? Number((data.change * 10).toFixed(1)) : inst.change24hPips,
+                change24h: finalChangePercent,
+                change24hPips: finalChangePips,
                 tickDirection: livePrice >= inst.currentPrice ? 'UP' : 'DOWN',
               };
             }
@@ -771,34 +1072,120 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
           setGoldDataSource(data.source || 'Live Institutional Spot Feed');
           setLastGoldSyncTime(Date.now());
-
-          // If current active symbol is XAU/USD, calibrate candles around today's live price
-          if (activeSymbol === 'XAU/USD') {
-            setCandles(prev => {
-              if (prev.length === 0 || Math.abs(prev[prev.length - 1].close - livePrice) > 100) {
-                return generateCandles(livePrice, 70, 0.0018, timeframe);
-              }
-              const last = { ...prev[prev.length - 1] };
-              last.close = livePrice;
-              last.high = Math.max(last.high, livePrice);
-              last.low = Math.min(last.low, livePrice);
-              last.isBullish = last.close >= last.open;
-              return [...prev.slice(0, -1), last];
-            });
+          if (data.goldApiNotice) {
+            setGoldApiNotice(data.goldApiNotice);
+          } else if (data.goldApiStatus === 'ACTIVE') {
+            setGoldApiNotice(null);
           }
+
+          // Calibrate candles around active instrument's live price
+          setCandles(prev => {
+            if (prev.length === 0 || Math.abs(prev[prev.length - 1].close - livePrice) / livePrice > 0.05) {
+              return generateCandles(livePrice, 200, undefined, timeframe);
+            }
+            const last = { ...prev[prev.length - 1] };
+            last.close = livePrice;
+            last.high = Math.max(last.high, livePrice);
+            last.low = Math.min(last.low, livePrice);
+            last.isBullish = last.close >= last.open;
+            return [...prev.slice(0, -1), last];
+          });
         }
       }
     } catch (err) {
       console.warn('Live gold price fetch notice:', err);
     }
-  }, [goldApiKey, adminProfile.goldApiKey, handleOfflineDetected, activeSymbol, timeframe]);
+  }, [goldApiKey, adminProfile.goldApiKey, handleOfflineDetected, activeSymbol, timeframe, goldSpreadPips]);
+
+  // Test GoldAPI key directly and return diagnostic payload
+  const testGoldApiKey = useCallback(async (keyToCheck?: string) => {
+    const key = keyToCheck !== undefined ? keyToCheck : (goldApiKey || adminProfile.goldApiKey);
+    try {
+      const res = await fetch(`/api/gold-api-test?key=${encodeURIComponent(key || '')}`);
+      const data = await res.json();
+      if (data.status === 'ACTIVE_AND_VALID') {
+        setGoldApiNotice(null);
+      } else if (data.error || data.message) {
+        setGoldApiNotice(data.error || data.message);
+      }
+      return data;
+    } catch (err: any) {
+      return {
+        success: false,
+        status: 'NETWORK_ERROR',
+        message: err?.message || 'Failed to connect to GoldAPI test service',
+      };
+    }
+  }, [goldApiKey, adminProfile.goldApiKey]);
+
+  // Manual / Instant XM Terminal Quote Calibration
+  const calibrateGoldQuote = useCallback((calibratedPrice: number, calibratedChangePercent?: number, calibratedOpen?: number) => {
+    const price = Number(calibratedPrice);
+    if (isNaN(price) || price <= 0) return;
+
+    setInstruments(prev => prev.map(inst => {
+      if (inst.symbol === 'XAU/USD') {
+        const spreadDollars = goldSpreadPips / inst.pipMultiplier;
+        const halfSpread = spreadDollars / 2;
+        const newBid = Number((price - halfSpread).toFixed(2));
+        const newAsk = Number((price + halfSpread).toFixed(2));
+
+        let openPrice = calibratedOpen;
+        let changePct = calibratedChangePercent;
+
+        if (openPrice !== undefined && !isNaN(openPrice) && openPrice > 0) {
+          changePct = Number((((price - openPrice) / openPrice) * 100).toFixed(2));
+        } else if (changePct !== undefined && !isNaN(changePct)) {
+          openPrice = Number((price / (1 + changePct / 100)).toFixed(2));
+        } else {
+          openPrice = inst.open24h || 4407.30;
+          changePct = Number((((price - openPrice) / openPrice) * 100).toFixed(2));
+        }
+
+        const changePips = Number(((price - openPrice) * inst.pipMultiplier).toFixed(1));
+
+        return {
+          ...inst,
+          currentPrice: price,
+          open24h: openPrice,
+          bid: newBid,
+          ask: newAsk,
+          spreadPips: goldSpreadPips,
+          high24h: Math.max(inst.high24h, price),
+          low24h: Math.min(inst.low24h, price),
+          change24h: changePct,
+          change24hPips: changePips,
+          tickDirection: price >= inst.currentPrice ? 'UP' : 'DOWN',
+        };
+      }
+      return inst;
+    }));
+
+    setGoldDataSource('Calibrated to Terminal Feed');
+    setLastGoldSyncTime(Date.now());
+    realMarketPriceRef.current = price;
+
+    if (activeSymbol === 'XAU/USD') {
+      setCandles(prev => {
+        if (prev.length === 0 || Math.abs(prev[prev.length - 1].close - price) > 30) {
+          return generateCandles(price, 200, undefined, timeframe);
+        }
+        const last = { ...prev[prev.length - 1] };
+        last.close = price;
+        last.high = Math.max(last.high, price);
+        last.low = Math.min(last.low, price);
+        last.isBullish = last.close >= last.open;
+        return [...prev.slice(0, -1), last];
+      });
+    }
+  }, [goldSpreadPips, activeSymbol, timeframe]);
 
   // Initial and periodic price fetch
   useEffect(() => {
     refreshGoldPrice();
     const interval = setInterval(() => {
       refreshGoldPrice();
-    }, 10000); // sync real live spot every 10s
+    }, 2500); // sync real live spot every 2.5s
 
     return () => clearInterval(interval);
   }, [refreshGoldPrice]);
@@ -808,17 +1195,31 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setAdminProfile(prev => ({ ...prev, ...settings }));
   }, []);
 
-  // Real-time ticking engine
+  // Determine consolidated market closed state (from session manager or server status)
+  const isMarketClosedEffective = useMemo(() => {
+    return currentSession.isMarketClosed || marketStatus === 'CLOSED';
+  }, [currentSession.isMarketClosed, marketStatus]);
+
+  // Real-time ticking engine - strictly FROZEN when the global gold market is closed
   useEffect(() => {
-    if (!isLiveFeedActive || isOfflineLocked) return;
+    // If market is closed, offline, or live feed toggled off, do not simulate ticks
+    if (!isLiveFeedActive || isOfflineLocked || isMarketClosedEffective) return;
 
     const interval = setInterval(() => {
       setInstruments(prevInstruments => {
         return prevInstruments.map(inst => {
-          // Generate micro-tick
-          const volatility = inst.symbol.startsWith('XAU') ? 0.45 : inst.symbol.includes('BTC') ? 22.0 : 0.00015;
-          const delta = (Math.random() - 0.49) * volatility;
-          const newPrice = Number((inst.currentPrice + delta).toFixed(inst.decimals));
+          let newPrice: number;
+          if (inst.symbol.startsWith('XAU')) {
+            const anchor = realMarketPriceRef.current ?? inst.currentPrice;
+            // Pull tightly towards the latest live physical spot feed without wandering
+            const meanReversion = (anchor - inst.currentPrice) * 0.45;
+            const microJitter = (Math.random() - 0.49) * 0.14;
+            newPrice = Number((inst.currentPrice + meanReversion + microJitter).toFixed(inst.decimals));
+          } else {
+            const volatility = inst.symbol.includes('BTC') ? 22.0 : 0.00015;
+            const delta = (Math.random() - 0.49) * volatility;
+            newPrice = Number((inst.currentPrice + delta).toFixed(inst.decimals));
+          }
           const tickDir: 'UP' | 'DOWN' | 'EQUAL' = newPrice > inst.currentPrice ? 'UP' : newPrice < inst.currentPrice ? 'DOWN' : 'EQUAL';
           
           const halfSpread = (inst.spreadPips / inst.pipMultiplier) / 2;
@@ -827,13 +1228,15 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           const newHigh = Math.max(inst.high24h, newPrice);
           const newLow = Math.min(inst.low24h, newPrice);
 
-          // Change calculation
-          const change24h = Number((inst.change24h + (delta / inst.currentPrice) * 100).toFixed(2));
-          const change24hPips = Number(((newPrice - (inst.currentPrice / (1 + inst.change24h / 100))) * inst.pipMultiplier).toFixed(1));
+          // Broker-aligned mathematical change calculation relative to fixed daily open anchor
+          const openPrice = inst.open24h || (inst.currentPrice / (1 + (inst.change24h || 0) / 100));
+          const change24h = Number((((newPrice - openPrice) / openPrice) * 100).toFixed(2));
+          const change24hPips = Number(((newPrice - openPrice) * inst.pipMultiplier).toFixed(1));
 
           return {
             ...inst,
             currentPrice: newPrice,
+            open24h: openPrice,
             bid: newBid,
             ask: newAsk,
             high24h: newHigh,
@@ -847,11 +1250,32 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       setLastTickTime(Date.now());
 
-      // Update current live candle
+      // Update current live candle with timeframe interval rollover
       setCandles(prevCandles => {
         if (prevCandles.length === 0) return prevCandles;
-        const last = { ...prevCandles[prevCandles.length - 1] };
         const price = activeInstrument.currentPrice;
+        const last = { ...prevCandles[prevCandles.length - 1] };
+        const tfSpec = getDominionTimeframe(timeframe);
+        const intervalMs = tfSpec.intervalMs;
+        const now = Date.now();
+        const currentBarTime = Math.floor(now / intervalMs) * intervalMs;
+
+        // If the candle time has elapsed into a new bar interval, form the next candle
+        if (currentBarTime > last.time) {
+          last.isComplete = true;
+          const nextCandle: Candle = {
+            time: currentBarTime,
+            open: last.close,
+            high: Math.max(last.close, price),
+            low: Math.min(last.close, price),
+            close: price,
+            volume: 1,
+            isBullish: price >= last.close,
+            isComplete: false,
+          };
+          return [...prevCandles.slice(1), last, nextCandle];
+        }
+
         last.close = price;
         last.high = Math.max(last.high, price);
         last.low = Math.min(last.low, price);
@@ -886,7 +1310,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }, tickSpeedMs);
 
     return () => clearInterval(interval);
-  }, [isLiveFeedActive, isOfflineLocked, tickSpeedMs, activeInstrument, instruments]);
+  }, [isLiveFeedActive, isOfflineLocked, isMarketClosedEffective, tickSpeedMs, activeInstrument, instruments]);
 
   // Compute live multi-timeframe metrics for the active instrument
   const mtfMetrics = useMemo(() => {
@@ -951,7 +1375,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setIsGeneratingSignal(true);
     setTimeout(() => {
       const generated: ScalpSignal[] = [];
-      const symbolsToScan = ['XAU/USD', 'EUR/USD', 'GBP/USD', 'BTC/USD'];
+      const symbolsToScan = ['XAU/USD'];
       
       symbolsToScan.forEach(sym => {
         const inst = instruments.find(i => i.symbol === sym) || activeInstrument;
@@ -1130,10 +1554,16 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setTickSpeedMs,
     lastTickTime,
     goldDataSource,
+    goldApiNotice,
     lastGoldSyncTime,
+    marketStatus,
+    isMarketClosed: isMarketClosedEffective,
+    marketClosureReason: marketClosureReason || currentSession.marketClosureReason,
     goldApiKey,
     setGoldApiKey,
     refreshGoldPrice,
+    testGoldApiKey,
+    calibrateGoldQuote,
     isOnline,
     networkStatus,
     isOfflineLocked,
@@ -1166,13 +1596,19 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setIsAndroidInstallModalOpen,
     canInstallPwa,
     promptInstallPwa,
+    brokerTier,
     xmBrokerTier,
     goldSpreadPips,
+    updateBrokerSpread,
     updateXmSpread,
     isXmModalOpen,
     setIsXmModalOpen,
     isDownloadModalOpen,
     setIsDownloadModalOpen,
+    isGoldKeyModalOpen,
+    setIsGoldKeyModalOpen,
+    isSettingsModalOpen,
+    setIsSettingsModalOpen,
     strategyConfig,
     updateStrategyConfig,
     toggleStrategyEnabled,
@@ -1185,6 +1621,25 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setSessionSimulationOverride,
     activeTab,
     setActiveTab,
+    studioTargetStrategy,
+    studioTargetIndicator,
+    openStudioForStrategy,
+    openStudioForIndicator,
+    clearStudioTargets,
+    projects,
+    activeProject,
+    setActiveProject,
+    addProject,
+    updateProject,
+    deleteProject,
+    isAngelModalOpen,
+    setIsAngelModalOpen,
+    goldMemories,
+    addGoldMemory,
+    updateGoldMemory,
+    deleteGoldMemory,
+    toggleGoldMemoryActive,
+    clearAllGoldMemories,
   };
 
   return (

@@ -377,7 +377,7 @@ export const ScalpGeneratorTab: React.FC = () => {
                     </div>
                   </div>
                   <div className="text-[11px] font-mono text-slate-400">
-                    XM Spread Cost: <span className="text-amber-400 font-bold">-${(activeInstrument.spreadPips * customLotSize * 10).toFixed(2)}</span> ({activeInstrument.spreadPips.toFixed(1)} pips / ${(activeInstrument.spreadPips / 10).toFixed(2)} oz)
+                    Spread Cost: <span className="text-amber-400 font-bold">-${(activeInstrument.spreadPips * customLotSize * 10).toFixed(2)}</span> ({activeInstrument.spreadPips.toFixed(1)} pips / ${(activeInstrument.spreadPips / 10).toFixed(2)} oz)
                   </div>
                 </div>
 

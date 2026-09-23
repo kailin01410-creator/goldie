@@ -1,4 +1,20 @@
-export type TimeframeId = '1m' | '5m' | '15m' | '1h' | '4h' | '1d';
+export type TimeframeId = 
+  | '1m' 
+  | '2m' 
+  | '3m' 
+  | '5m' 
+  | '10m' 
+  | '15m' 
+  | '30m' 
+  | '1h' 
+  | '2h' 
+  | '4h' 
+  | '6h' 
+  | '8h' 
+  | '12h' 
+  | '1d' 
+  | '1w' 
+  | '1M';
 
 export type MarketDirection = 'BUY' | 'SELL';
 
@@ -20,7 +36,9 @@ export type StrategyId =
   | 'DAY_BREAKOUT_LONDON_PULLBACK'
   | 'DAY_MULTI_INDICATOR_CONFLUENCE'
   // Macro & Intermarket Correlation Strategies
-  | 'DXY_GOLD_INVERSE_CORRELATION';
+  | 'DXY_GOLD_INVERSE_CORRELATION'
+  // Mobile GoldScalp Ultra-Fast Signal Engine
+  | 'GOLDSCALP_FAST_MOMENTUM_RSI_MACD';
 
 export type IndicatorType = 
   | 'RSI_14'
@@ -66,6 +84,7 @@ export interface Instrument {
   spreadPips: number;
   high24h: number;
   low24h: number;
+  open24h?: number;
   volume24h: string;
   change24h: number;
   change24hPips: number;
@@ -80,6 +99,7 @@ export interface Candle {
   close: number;
   volume: number;
   isBullish: boolean;
+  isComplete?: boolean;
   orderBlock?: 'BULLISH_OB' | 'BEARISH_OB';
   fvg?: 'BULLISH_FVG' | 'BEARISH_FVG';
 }
@@ -89,8 +109,11 @@ export interface TimeframeMetrics {
   label: string;
   changePercent: number;
   changePips: number;
+  open: number;
+  close: number;
   high: number;
   low: number;
+  volume: number;
   trend: 'STRONG_BULL' | 'BULL' | 'NEUTRAL' | 'BEAR' | 'STRONG_BEAR';
   rsi: number;
   emaCross: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
@@ -234,21 +257,25 @@ export interface TerminalRiskSettings {
   slippageSimulationPips: number;
   autoBreakevenAtR: number; // move to BE at 1R
   goldApiKey?: string;
-  xmBrokerTier?: XmBrokerTier;
+  brokerTier?: BrokerTier;
+  goldSpreadPips?: number;
+  xmBrokerTier?: BrokerTier;
   xmGoldSpreadPips?: number;
 }
 
 export type AdminProfile = TerminalRiskSettings;
 export type RiskSettings = TerminalRiskSettings;
 
-export type XmBrokerTier = 'XM_ULTRA_LOW' | 'XM_STANDARD' | 'XM_MICRO' | 'CUSTOM';
+export type BrokerTier = 'STANDARD' | 'ULTRA_LOW' | 'MICRO' | 'CUSTOM';
+export type XmBrokerTier = BrokerTier;
 
-export interface XmBrokerSettings {
-  tier: XmBrokerTier;
+export interface BrokerSettings {
+  tier: BrokerTier;
   goldSpreadPips: number;
   label: string;
   description: string;
 }
+export type XmBrokerSettings = BrokerSettings;
 
 export type NetworkConnectivityStatus = 'ONLINE' | 'OFFLINE' | 'CHECKING';
 
@@ -461,4 +488,178 @@ export interface MultiFactorStrategyConfig {
   enableNewsFilter: boolean;
   minConfluenceScore: number;    // default 75
   liveExecutionEnabled: boolean; // default false (strict safety: paper trading only unless explicitly enabled)
+}
+
+// Gold Tick Data Representation
+export interface GoldTick {
+  t?: number;
+  time?: number;
+  price?: number;
+  spot?: number;
+  bid: number;
+  ask: number;
+  spread?: number;
+  spreadPips?: number;
+  dailyOpen?: number;
+  dailyHigh?: number;
+  dailyLow?: number;
+  pipsFromOpen?: number;
+  pctFromOpen?: number;
+  signal?: 'STRONG BUY' | 'SCALPING SHORT' | 'NEUTRAL';
+  signalStrength?: number;
+  rsi1?: number;
+  rsi5?: number;
+  macdHist?: number;
+  bias?: string;
+  sentimentBuy?: number;
+  sentimentSell?: number;
+  score1m?: number;
+  score5m?: number;
+  score15m?: number;
+  history?: Array<{ t: number; spot?: number; price?: number }>;
+  change?: number;
+  changePercent?: number;
+  volume?: number;
+}
+
+// GoldScalp Signal Engine Types
+export type GoldScalpSignalType = 'STRONG BUY' | 'SCALPING SHORT' | 'NEUTRAL';
+
+export interface DashboardIndicatorSettings {
+  showSma20: boolean;
+  showEma50: boolean;
+  showEma200: boolean;
+  showVwap: boolean;
+  showSupportResistance: boolean;
+  showVolume: boolean;
+  chartType: 'CANDLESTICK' | 'LINE';
+}
+
+export type MarketDirectionAssessment = 'Bullish' | 'Bearish' | 'Neutral' | 'Insufficient data';
+
+export interface MarketOverviewMetrics {
+  currentPrice: number;
+  dailyHigh: number;
+  dailyLow: number;
+  dailyChangeDollars: number;
+  dailyChangePercent: number;
+  volatilityAtrDollars: number | null;
+  volatilityAtrPips: number | null;
+  dayRangeDollars: number;
+  dayRangePips: number;
+  marketDirection: MarketDirectionAssessment;
+  marketDirectionRationale: string;
+  lastUpdate: number;
+  dataSource: string;
+}
+
+export interface TechnicalAnalysisSnapshot {
+  sma20: number | null;
+  ema50: number | null;
+  ema200: number | null;
+  rsi14: number | null;
+  rsiCondition: 'Overbought (>70)' | 'Oversold (<30)' | 'Neutral (30-70)' | 'Not enough data';
+  macdLine: number | null;
+  macdSignal: number | null;
+  macdHist: number | null;
+  macdCondition: 'Bullish Crossover' | 'Bearish Crossover' | 'Neutral' | 'Not enough data';
+  atr14: number | null;
+  atrPips: number | null;
+  supportLevel1: number | null;
+  supportLevel2: number | null;
+  resistanceLevel1: number | null;
+  resistanceLevel2: number | null;
+  pivotPoint: number | null;
+  recentSwingHigh: { price: number; time: number } | null;
+  recentSwingLow: { price: number; time: number } | null;
+}
+
+// ANGEL AI Companion Data Structures
+export type GoldMemoryCategory = 
+  | 'STRATEGY_RULES' 
+  | 'MACRO_FUNDAMENTALS' 
+  | 'KEY_LEVELS' 
+  | 'TRADE_JOURNAL' 
+  | 'UPLOADED_DOC' 
+  | 'CONVERSATION_MEMORY' 
+  | 'CUSTOM_DATA';
+
+export interface GoldMemoryItem {
+  id: string;
+  title: string;
+  category: GoldMemoryCategory;
+  content: string;
+  sourceType: 'TEXT_NOTE' | 'FILE_UPLOAD';
+  fileName?: string;
+  fileSize?: string;
+  fileType?: string;
+  createdAt: number;
+  updatedAt: number;
+  isActive: boolean;
+  tags?: string[];
+}
+
+export type AngelCommunicationStyle = 
+  | 'COURTEOUS_DEVOTED' 
+  | 'WARM_EMPATHIC' 
+  | 'DIGNIFIED_MENTOR' 
+  | 'INQUISITIVE_PARTNER';
+
+export type AngelRespectLevel = 'HIGH_COURTESY' | 'WARM_CORDIAL' | 'REVERENT';
+export type AngelConversationalDepth = 'PROACTIVE_ENGAGING' | 'BALANCED' | 'CONCISE';
+
+export interface AngelCommunicationConfig {
+  style: AngelCommunicationStyle;
+  respectLevel: AngelRespectLevel;
+  conversationalDepth: AngelConversationalDepth;
+  userPreferredName: string;
+  enablePsychologyCheckIns: boolean;
+  proactiveFollowUps: boolean;
+  gratitudeAndHumility: boolean;
+}
+
+export interface AngelProject {
+  id: string;
+  name: string;
+  category: 'SCALPING' | 'SWING' | 'PROP_FIRM' | 'ALGO_QUANT' | 'CUSTOM';
+  description: string;
+  targetSymbol: string;
+  preferredTimeframes: TimeframeId[];
+  riskRewardRatio: string;
+  maxRiskPerTradePercent: number;
+  strategyFocus: string;
+  rules: string[];
+  notes: string;
+  createdDate: string;
+}
+
+export interface AngelChatMessage {
+  id: string;
+  sender: 'user' | 'angel';
+  text: string;
+  timestamp: number;
+  metadata?: {
+    projectUsed?: string;
+    timeframe?: string;
+    price?: number;
+    sentiment?: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+    riskScore?: number;
+    actionableAdvice?: string;
+    memoriesRead?: number;
+  };
+}
+
+
+export interface OrderFlowPanelStatus {
+  isAvailable: boolean;
+  providerNotice: string;
+  requiredDataFeeds: string[];
+  specsExplanation: string;
+}
+
+export interface OptionsGexPanelStatus {
+  isAvailable: boolean;
+  providerNotice: string;
+  requiredDataFeeds: string[];
+  specsExplanation: string;
 }

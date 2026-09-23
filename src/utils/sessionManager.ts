@@ -11,7 +11,7 @@
 
 import { Candle, ScalpSignal, StrategyId } from '../types';
 
-export type TradingSessionId = 'ASIAN' | 'LONDON' | 'NEW_YORK' | 'LONDON_NY_OVERLAP' | 'OFF_HOURS';
+export type TradingSessionId = 'ASIAN' | 'LONDON' | 'NEW_YORK' | 'LONDON_NY_OVERLAP' | 'OFF_HOURS' | 'WEEKEND_CLOSED';
 
 export interface MarketSessionDetail {
   id: TradingSessionId;
@@ -26,8 +26,8 @@ export interface MarketSessionDetail {
   isPeakLiquidity?: boolean;
   progressPercent: number; // 0 - 100
   timeRemainingFormatted: string;
-  volatilityRating: 'Low-Med (Accumulation)' | 'High (Breakouts & Sweeps)' | 'Very High (Wall St Flow)' | 'Extreme (Peak Institutional)';
-  typicalSpreadStatus: 'Standard' | 'Tight' | 'Lowest (XM Ultra Low)' | 'Widening';
+  volatilityRating: 'Low-Med (Accumulation)' | 'High (Breakouts & Sweeps)' | 'Very High (Wall St Flow)' | 'Extreme (Peak Institutional)' | 'Zero (Market Closed)';
+  typicalSpreadStatus: 'Standard' | 'Tight' | 'Lowest (Ultra-Low)' | 'Widening' | 'Closed / Off-Market';
   dominantPairs: string[];
   keyStrategies: string[];
   strategyConfluenceHint: string;
@@ -47,6 +47,11 @@ export interface CurrentSessionState {
   utcMinutes: number;
   utcSeconds: number;
   currentTotalMinutes: number;
+  dayOfWeek: number; // 0=Sun, 1=Mon, ..., 6=Sat
+  isMarketClosed: boolean;
+  marketClosureReason: string;
+  timeUntilMarketOpenFormatted: string;
+  activeSessionsSummary: string;
   isAsiaActive: boolean;
   isLondonActive: boolean;
   isNyActive: boolean;
@@ -82,7 +87,7 @@ export const SESSION_DEFINITIONS: Record<'asia' | 'london' | 'newYork' | 'overla
     endMinutes: 480,
     volatilityRating: 'Low-Med (Accumulation)',
     typicalSpreadStatus: 'Standard',
-    dominantPairs: ['USD/JPY', 'AUD/USD', 'XAU/USD (Range)'],
+    dominantPairs: ['XAU/USD (Range Accumulation)'],
     keyStrategies: [
       'Asian Range Accumulation (AMD Phase A)',
       'VWAP Mean Reversion (±2.0σ Bands)',
@@ -109,7 +114,7 @@ export const SESSION_DEFINITIONS: Record<'asia' | 'london' | 'newYork' | 'overla
     endMinutes: 930,
     volatilityRating: 'High (Breakouts & Sweeps)',
     typicalSpreadStatus: 'Tight',
-    dominantPairs: ['GBP/USD', 'EUR/USD', 'XAU/USD'],
+    dominantPairs: ['XAU/USD (Gold Breakouts & Sweeps)'],
     keyStrategies: [
       'Asian Range Breakout & Judas Swing (AMD Phase M)',
       'London Liquidity Sweep & Fair Value Gap (FVG)',
@@ -135,8 +140,8 @@ export const SESSION_DEFINITIONS: Record<'asia' | 'london' | 'newYork' | 'overla
     startMinutes: 750,
     endMinutes: 1260,
     volatilityRating: 'Very High (Wall St Flow)',
-    typicalSpreadStatus: 'Lowest (XM Ultra Low)',
-    dominantPairs: ['XAU/USD', 'EUR/USD', 'BTC/USD', 'DXY Index'],
+    typicalSpreadStatus: 'Lowest (Ultra-Low)',
+    dominantPairs: ['XAU/USD (Wall Street Commodity Flow)'],
     keyStrategies: [
       'DXY vs Gold Inverse Macro Engine (+11% WR Boost)',
       'Order Flow POC Breakouts & Value Area Expansion',
@@ -163,14 +168,14 @@ export const SESSION_DEFINITIONS: Record<'asia' | 'london' | 'newYork' | 'overla
     endMinutes: 930,
     isPeakLiquidity: true,
     volatilityRating: 'Extreme (Peak Institutional)',
-    typicalSpreadStatus: 'Lowest (XM Ultra Low)',
-    dominantPairs: ['XAU/USD (Peak Move)', 'EUR/USD', 'GBP/USD'],
+    typicalSpreadStatus: 'Lowest (Ultra-Low)',
+    dominantPairs: ['XAU/USD (Peak Move Golden Window)'],
     keyStrategies: [
       'All Dual-Engine Scalping (M1/M5) & Day Swings (H1)',
       'DXY Macro Correlation Invalidation & Gold Surges',
       'High-Volume Delta POC Retests'
     ],
-    strategyConfluenceHint: 'The Golden Window: Highest liquidity and tightest XM spreads of the 24-hour cycle. 70%+ of daily Gold range occurs here. All institutional filters are fully active.',
+    strategyConfluenceHint: 'The Golden Window: Highest liquidity and tightest market spreads of the 24-hour cycle. 70%+ of daily Gold range occurs here. All institutional filters are fully active.',
     color: {
       bg: 'bg-emerald-950/50',
       border: 'border-emerald-500/50',
@@ -201,13 +206,53 @@ export function getCurrentSessionDetails(targetDate?: Date): CurrentSessionState
   const utcHours = now.getUTCHours();
   const utcMinutes = now.getUTCMinutes();
   const utcSeconds = now.getUTCSeconds();
+  const dayOfWeek = now.getUTCDay(); // 0 = Sunday, 1 = Monday, ..., 5 = Friday, 6 = Saturday
   const currentTotalMinutes = utcHours * 60 + utcMinutes;
 
   const pad = (n: number) => n.toString().padStart(2, '0');
   const utcTimeString = `${pad(utcHours)}:${pad(utcMinutes)}:${pad(utcSeconds)} UTC`;
 
+  // Real-world Interbank Gold & Forex Market Hours
+  // Markets close Friday at 21:00 UTC (17:00 NY)
+  // Markets reopen Sunday at 22:00 UTC (18:00 NY / Sydney open)
+  // Daily maintenance break: Monday - Thursday 21:00 - 22:00 UTC (1 hour rollover)
+  let isMarketClosed = false;
+  let marketClosureReason = '';
+  let minutesUntilMarketOpen = 0;
+
+  if (dayOfWeek === 5 && currentTotalMinutes >= 1260) {
+    // Friday after 21:00 UTC
+    isMarketClosed = true;
+    marketClosureReason = 'Global Weekend Close (Friday settlement completed)';
+    // Remaining mins on Friday + all Saturday (1440) + Sunday up to 22:00 (1320)
+    minutesUntilMarketOpen = (1440 - currentTotalMinutes) + 1440 + 1320;
+  } else if (dayOfWeek === 6) {
+    // Saturday full 24 hours
+    isMarketClosed = true;
+    marketClosureReason = 'Global Weekend Close (Interbank liquidity offline)';
+    minutesUntilMarketOpen = (1440 - currentTotalMinutes) + 1320;
+  } else if (dayOfWeek === 0) {
+    // Sunday before 22:00 UTC
+    if (currentTotalMinutes < 1320) {
+      isMarketClosed = true;
+      marketClosureReason = 'Global Weekend Close (Reopening Sydney/Asia session at 22:00 UTC)';
+      minutesUntilMarketOpen = 1320 - currentTotalMinutes;
+    }
+  } else if (dayOfWeek >= 1 && dayOfWeek <= 4) {
+    // Monday - Thursday 21:00 - 22:00 UTC Daily Rollover
+    if (currentTotalMinutes >= 1260 && currentTotalMinutes < 1320) {
+      isMarketClosed = true;
+      marketClosureReason = 'Daily Interbank Rollover & Maintenance Break (21:00 - 22:00 UTC)';
+      minutesUntilMarketOpen = 1320 - currentTotalMinutes;
+    }
+  }
+
+  const timeUntilMarketOpenFormatted = isMarketClosed
+    ? formatRemainingTime(minutesUntilMarketOpen)
+    : 'Market Active';
+
   // Asia: 00:00 - 08:00 UTC (0 to 480 mins)
-  const isAsiaActive = currentTotalMinutes >= 0 && currentTotalMinutes < 480;
+  const isAsiaActive = !isMarketClosed && currentTotalMinutes >= 0 && currentTotalMinutes < 480;
   let asiaProgress = 0;
   let asiaRemaining = 0;
   if (isAsiaActive) {
@@ -219,7 +264,7 @@ export function getCurrentSessionDetails(targetDate?: Date): CurrentSessionState
   }
 
   // London: 07:00 - 15:30 UTC (420 to 930 mins)
-  const isLondonActive = currentTotalMinutes >= 420 && currentTotalMinutes < 930;
+  const isLondonActive = !isMarketClosed && currentTotalMinutes >= 420 && currentTotalMinutes < 930;
   let londonProgress = 0;
   let londonRemaining = 0;
   if (isLondonActive) {
@@ -230,7 +275,7 @@ export function getCurrentSessionDetails(targetDate?: Date): CurrentSessionState
   }
 
   // New York: 12:30 - 21:00 UTC (750 to 1260 mins)
-  const isNyActive = currentTotalMinutes >= 750 && currentTotalMinutes < 1260;
+  const isNyActive = !isMarketClosed && currentTotalMinutes >= 750 && currentTotalMinutes < 1260;
   let nyProgress = 0;
   let nyRemaining = 0;
   if (isNyActive) {
@@ -241,7 +286,7 @@ export function getCurrentSessionDetails(targetDate?: Date): CurrentSessionState
   }
 
   // London / NY Overlap: 12:30 - 15:30 UTC (750 to 930 mins)
-  const isOverlapActive = currentTotalMinutes >= 750 && currentTotalMinutes < 930;
+  const isOverlapActive = !isMarketClosed && currentTotalMinutes >= 750 && currentTotalMinutes < 930;
   let overlapProgress = 0;
   let overlapRemaining = 0;
   if (isOverlapActive) {
@@ -251,7 +296,7 @@ export function getCurrentSessionDetails(targetDate?: Date): CurrentSessionState
     overlapRemaining = currentTotalMinutes < 750 ? (750 - currentTotalMinutes) : (1440 - currentTotalMinutes + 750);
   }
 
-  const isOffHours = !isAsiaActive && !isLondonActive && !isNyActive;
+  const isOffHours = !isMarketClosed && !isAsiaActive && !isLondonActive && !isNyActive;
 
   // Build detail objects
   const asiaDetail: MarketSessionDetail = {
@@ -292,7 +337,16 @@ export function getCurrentSessionDetails(targetDate?: Date): CurrentSessionState
   let activeStrategyRecommendation = 'Consolidation / Reduced Position Sizing';
   let activeStrategyFilterHint = 'Market volume is light. Wait for Asian Open or trade wide range extremes with reduced risk.';
 
-  if (isOverlapActive) {
+  if (isMarketClosed) {
+    primaryActiveSessionId = 'WEEKEND_CLOSED';
+    primaryActiveName = 'Market Closed';
+    primaryActiveShort = 'Closed';
+    primaryActiveFlag = '🔒';
+    primaryActiveVolatility = 'Zero (Market Closed)';
+    isHighLiquidityWindow = false;
+    activeStrategyRecommendation = 'Market Closed - Interbank Liquidity Offline';
+    activeStrategyFilterHint = `Global gold and FX spot markets are closed. Reopens Sunday 22:00 UTC (${timeUntilMarketOpenFormatted}). Live prices are frozen at the official weekend settlement price.`;
+  } else if (isOverlapActive) {
     primaryActiveSessionId = 'LONDON_NY_OVERLAP';
     primaryActiveName = overlapDetail.name;
     primaryActiveShort = 'LDN / NY Overlap';
@@ -336,12 +390,23 @@ export function getCurrentSessionDetails(targetDate?: Date): CurrentSessionState
   if (isNyActive && !isOverlapActive) activeSessionsList.push(nyDetail);
   if (isAsiaActive) activeSessionsList.push(asiaDetail);
 
+  const activeSessionsSummary = isMarketClosed
+    ? 'Market Closed (Reopens Sun 22:00 UTC)'
+    : activeSessionsList.length > 0
+    ? activeSessionsList.map(s => s.shortName).join(' + ')
+    : 'Off-Hours';
+
   return {
     utcTimeString,
     utcHours,
     utcMinutes,
     utcSeconds,
     currentTotalMinutes,
+    dayOfWeek,
+    isMarketClosed,
+    marketClosureReason,
+    timeUntilMarketOpenFormatted,
+    activeSessionsSummary,
     isAsiaActive,
     isLondonActive,
     isNyActive,

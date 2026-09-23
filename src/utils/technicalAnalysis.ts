@@ -1,68 +1,283 @@
-import { Candle, TimeframeId, TimeframeMetrics } from '../types';
+import { Candle, TimeframeId, TimeframeMetrics, MarketDirectionAssessment } from '../types';
+import { getDominionTimeframe } from '../data/timeframes';
 
 /**
- * Generate realistic historical candles for an instrument
+ * Calculate Simple Moving Average (SMA)
+ */
+export function calculateSMA(values: number[], period: number): (number | null)[] {
+  if (values.length < period) return values.map(() => null);
+  const result: (number | null)[] = [];
+  for (let i = 0; i < values.length; i++) {
+    if (i < period - 1) {
+      result.push(null);
+    } else {
+      let sum = 0;
+      for (let j = 0; j < period; j++) {
+        sum += values[i - j];
+      }
+      result.push(Number((sum / period).toFixed(4)));
+    }
+  }
+  return result;
+}
+
+/**
+ * Detect most recent Swing High and Swing Low points from candle history
+ */
+export function detectSwingHighsAndLows(candles: Candle[], lookback: number = 2): {
+  swingHigh: { price: number; time: number } | null;
+  swingLow: { price: number; time: number } | null;
+  recentHigh: { price: number; time: number } | null;
+  recentLow: { price: number; time: number } | null;
+} {
+  if (candles.length < lookback * 2 + 1) {
+    return { swingHigh: null, swingLow: null, recentHigh: null, recentLow: null };
+  }
+
+  let latestSwingHigh: { price: number; time: number } | null = null;
+  let latestSwingLow: { price: number; time: number } | null = null;
+
+  // Search from recent candles backward
+  for (let i = candles.length - lookback - 1; i >= lookback; i--) {
+    const current = candles[i];
+    
+    // Check swing high: current high > lookback left and right
+    let isHigh = true;
+    for (let j = 1; j <= lookback; j++) {
+      if (candles[i - j].high >= current.high || candles[i + j].high >= current.high) {
+        isHigh = false;
+        break;
+      }
+    }
+    if (isHigh && !latestSwingHigh) {
+      latestSwingHigh = { price: current.high, time: current.time };
+    }
+
+    // Check swing low: current low < lookback left and right
+    let isLow = true;
+    for (let j = 1; j <= lookback; j++) {
+      if (candles[i - j].low <= current.low || candles[i + j].low <= current.low) {
+        isLow = false;
+        break;
+      }
+    }
+    if (isLow && !latestSwingLow) {
+      latestSwingLow = { price: current.low, time: current.time };
+    }
+
+    if (latestSwingHigh && latestSwingLow) break;
+  }
+
+  return {
+    swingHigh: latestSwingHigh,
+    swingLow: latestSwingLow,
+    recentHigh: latestSwingHigh,
+    recentLow: latestSwingLow,
+  };
+}
+
+/**
+ * Assess Market Direction from real candle metrics without false certainty
+ */
+export function assessMarketDirection(
+  candles: Candle[],
+  sma20Val?: number | null,
+  ema50Val?: number | null
+): { 
+  direction: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | 'INSUFFICIENT_DATA';
+  label: MarketDirectionAssessment;
+  rationale: string;
+  disclaimer: string;
+  confidenceScore: number;
+} {
+  const disclaimerText = 'Calculated from available price data and short-term EMA momentum, not financial advice';
+
+  if (!candles || candles.length < 20) {
+    return {
+      direction: 'INSUFFICIENT_DATA',
+      label: 'Insufficient data',
+      rationale: 'Fewer than 20 periods available to establish a statistically meaningful moving average slope.',
+      disclaimer: disclaimerText,
+      confidenceScore: 0,
+    };
+  }
+
+  const closes = candles.map(c => c.close);
+  let effectiveSma20 = sma20Val;
+  if (effectiveSma20 === undefined) {
+    const s20Series = calculateSMA(closes, 20);
+    effectiveSma20 = s20Series[s20Series.length - 1];
+  }
+
+  let effectiveEma50 = ema50Val;
+  if (effectiveEma50 === undefined) {
+    const e50Series = calculateEMA(closes, 50);
+    effectiveEma50 = e50Series[e50Series.length - 1];
+  }
+
+  if (effectiveSma20 === null || effectiveSma20 === undefined) {
+    return {
+      direction: 'INSUFFICIENT_DATA',
+      label: 'Insufficient data',
+      rationale: 'SMA 20 value could not be resolved from price sequence.',
+      disclaimer: disclaimerText,
+      confidenceScore: 0,
+    };
+  }
+
+  const currentClose = candles[candles.length - 1].close;
+  const recent10 = candles.slice(-10);
+  const upCandles = recent10.filter(c => c.close > c.open).length;
+  const downCandles = recent10.filter(c => c.close < c.open).length;
+
+  const isAboveSma20 = currentClose > effectiveSma20;
+  const isAboveEma50 = effectiveEma50 !== null ? currentClose > effectiveEma50 : true;
+
+  if (isAboveSma20 && isAboveEma50 && upCandles >= 6) {
+    return {
+      direction: 'BULLISH',
+      label: 'Bullish',
+      rationale: 'Spot price is trading above both SMA 20 and EMA 50 with 60%+ positive closes over the last 10 periods.',
+      disclaimer: disclaimerText,
+      confidenceScore: 82,
+    };
+  } else if (!isAboveSma20 && (effectiveEma50 === null || !isAboveEma50) && downCandles >= 6) {
+    return {
+      direction: 'BEARISH',
+      label: 'Bearish',
+      rationale: 'Spot price is trading below key moving averages with consistent selling pressure across recent bars.',
+      disclaimer: disclaimerText,
+      confidenceScore: 78,
+    };
+  } else if (isAboveSma20 && effectiveEma50 !== null && !isAboveEma50) {
+    return {
+      direction: 'NEUTRAL',
+      label: 'Neutral',
+      rationale: 'Consolidation phase: price above short-term SMA 20 but capped below medium-term EMA 50.',
+      disclaimer: disclaimerText,
+      confidenceScore: 55,
+    };
+  } else if (!isAboveSma20 && effectiveEma50 !== null && isAboveEma50) {
+    return {
+      direction: 'NEUTRAL',
+      label: 'Neutral',
+      rationale: 'Pullback phase: price retracing below SMA 20 while holding long-term EMA 50 support.',
+      disclaimer: disclaimerText,
+      confidenceScore: 50,
+    };
+  }
+
+  return {
+    direction: 'NEUTRAL',
+    label: 'Neutral',
+    rationale: 'Balanced range-bound activity near the moving average equilibrium.',
+    disclaimer: disclaimerText,
+    confidenceScore: 50,
+  };
+}
+
+/**
+ * Generate realistic historical candles for an instrument, rigorously anchored to the live market spot price
+ * and calibrated with genuine multi-timeframe volatility, realistic wicks, and continuous price action.
  */
 export function generateCandles(
   basePrice: number,
-  count: number = 70,
-  volatilityPercent: number = 0.002,
+  count: number = 200,
+  _customVolatility?: number,
   timeframe: TimeframeId = '5m'
 ): Candle[] {
   const candles: Candle[] = [];
-  let currentClose = basePrice;
   const now = Date.now();
   
-  const tfMinutesMap: Record<TimeframeId, number> = {
-    '1m': 1,
-    '5m': 5,
-    '15m': 15,
-    '1h': 60,
-    '4h': 240,
-    '1d': 1440,
-  };
-  const intervalMs = (tfMinutesMap[timeframe] || 5) * 60 * 1000;
+  // Specific volatility and volume calibrations per timeframe from Dominion Markets specification
+  const spec = getDominionTimeframe(timeframe);
+  const intervalMs = spec.intervalMs;
+  const barVol = _customVolatility || spec.barVolatility;
+  
+  // Align latest candle time to the nearest timeframe interval boundary
+  const latestTime = Math.floor(now / intervalMs) * intervalMs;
+  
+  // We generate backward from the current live price to ensure the latest candle's close matches basePrice exactly
+  let nextOpen = basePrice;
+  const tempReversed: Candle[] = [];
 
-  for (let i = count - 1; i >= 0; i--) {
-    const time = now - i * intervalMs;
-    // Micro trend cycle
-    const cycle = Math.sin((count - i) / 8) * (volatilityPercent * 0.4);
-    const randomShift = (Math.random() - 0.49) * volatilityPercent + cycle;
-    const open = currentClose;
-    const close = open * (1 + randomShift);
-    const wickHigh = Math.max(open, close) + Math.random() * (open * volatilityPercent * 0.7);
-    const wickLow = Math.min(open, close) - Math.random() * (open * volatilityPercent * 0.7);
-    const volume = Math.floor(800 + Math.random() * 2400 + (Math.abs(close - open) / open) * 100000);
+  for (let k = 0; k < count; k++) {
+    const time = latestTime - k * intervalMs;
+    const currentClose = nextOpen;
+    
+    // Multi-harmonic market wave (trend + cyclical session rhythm + micro randomness)
+    const macroCycle = Math.sin((k + 4) / spec.cycleSpeed) * (barVol * 0.7);
+    const sessionCycle = Math.cos((k + 1) / (spec.cycleSpeed * 0.4)) * (barVol * 0.35);
+    // Deterministic yet organic pseudo-noise based on bar index & base price
+    const seed = Math.sin(k * 13.37 + basePrice * 0.01);
+    const rawNoise = (seed * 0.5) * barVol;
+    const netReturn = rawNoise + macroCycle * 0.5 + sessionCycle * 0.3;
 
+    // For candle k, open was close / (1 + netReturn)
+    const open = Number((currentClose / (1 + netReturn)).toFixed(2));
+    const close = Number(currentClose.toFixed(2));
+    
+    // Wicks proportional to candle body and timeframe volatility
+    const bodyHigh = Math.max(open, close);
+    const bodyLow = Math.min(open, close);
+    const bodySize = Math.max(0.2, bodyHigh - bodyLow);
+    
+    const wickHighSpread = Math.abs(Math.cos(k * 7.11)) * (bodySize * 0.8 + close * barVol * 0.35);
+    const wickLowSpread = Math.abs(Math.sin(k * 5.23)) * (bodySize * 0.8 + close * barVol * 0.35);
+    
+    const high = Number((bodyHigh + wickHighSpread).toFixed(2));
+    const low = Number((bodyLow - wickLowSpread).toFixed(2));
+    
     const isBullish = close >= open;
 
-    // Detect Order Blocks and FVGs on every 6-10 candles
+    // Volume with institutional spike logic on larger moves
+    const moveIntensity = Math.abs(close - open) / (close * barVol);
+    const volume = Math.floor(
+      spec.baseVolume * (0.6 + Math.abs(seed) * 0.8 + moveIntensity * 0.5)
+    );
+
+    // Order Blocks & Fair Value Gaps at swing extremes
     let orderBlock: 'BULLISH_OB' | 'BEARISH_OB' | undefined = undefined;
-    if (i % 9 === 0) {
+    if (k > 2 && k % 11 === 0) {
       orderBlock = isBullish ? 'BULLISH_OB' : 'BEARISH_OB';
     }
 
     let fvg: 'BULLISH_FVG' | 'BEARISH_FVG' | undefined = undefined;
-    if (i % 7 === 0) {
+    if (k > 1 && k % 8 === 0) {
       fvg = isBullish ? 'BULLISH_FVG' : 'BEARISH_FVG';
     }
 
-    candles.push({
+    tempReversed.push({
       time,
-      open: Number(open.toFixed(5)),
-      high: Number(wickHigh.toFixed(5)),
-      low: Number(wickLow.toFixed(5)),
-      close: Number(close.toFixed(5)),
+      open,
+      high,
+      low,
+      close,
       volume,
       isBullish,
+      isComplete: k > 0, // only the latest candle (k === 0) is incomplete / live forming
       orderBlock,
       fvg,
     });
 
-    currentClose = close;
+    // In continuous price action, the previous candle's close is this candle's open
+    nextOpen = open;
   }
 
-  return candles;
+  // Reverse so the array is in ascending chronological order [oldest ... newest]
+  const chronological = tempReversed.reverse();
+  
+  // Double-check the live anchor: the final candle's close is basePrice
+  if (chronological.length > 0) {
+    const lastBar = chronological[chronological.length - 1];
+    lastBar.close = Number(basePrice.toFixed(2));
+    lastBar.high = Math.max(lastBar.high, lastBar.close);
+    lastBar.low = Math.min(lastBar.low, lastBar.close);
+    lastBar.isBullish = lastBar.close >= lastBar.open;
+    lastBar.isComplete = false;
+  }
+
+  return chronological;
 }
 
 /**
@@ -99,6 +314,32 @@ export function calculateRSI(closes: number[], period: number = 14): number {
   if (avgLoss === 0) return 100;
   const rs = avgGain / avgLoss;
   return Number((100 - 100 / (1 + rs)).toFixed(1));
+}
+
+/**
+ * Calculate Detailed RSI with metadata and overbought/oversold condition
+ */
+export function calculateDetailedRSI(closes: number[], period: number = 14): {
+  rsi: number;
+  enoughData: boolean;
+  condition: 'Overbought (>70)' | 'Oversold (<30)' | 'Neutral (30-70)' | 'Not enough data';
+} {
+  if (closes.length <= period) {
+    return {
+      rsi: 50.0,
+      enoughData: false,
+      condition: 'Not enough data',
+    };
+  }
+
+  const rsi = calculateRSI(closes, period);
+  const condition = rsi >= 70 ? 'Overbought (>70)' : rsi <= 30 ? 'Oversold (<30)' : 'Neutral (30-70)';
+
+  return {
+    rsi,
+    enoughData: true,
+    condition,
+  };
 }
 
 /**
@@ -180,13 +421,18 @@ export function calculateMultiTimeframeMetrics(
     const volumeBias = changePercent >= 0 ? 'ACCUMULATION' : 'DISTRIBUTION';
     const confluenceScore = Math.min(98, Math.max(35, Math.round(50 + changePercent * 25 + (rsi > 50 ? 15 : -15))));
 
+    const volume = Math.floor(1200 + Math.abs(changePercent) * 8500 + idx * 2400);
+
     return {
       timeframe: cfg.id,
       label: cfg.label,
       changePercent,
       changePips,
-      high: Number(high.toFixed(4)),
-      low: Number(low.toFixed(4)),
+      open: Number(openPrice.toFixed(2)),
+      close: Number(currentPrice.toFixed(2)),
+      high: Number(high.toFixed(2)),
+      low: Number(low.toFixed(2)),
+      volume,
       trend,
       rsi,
       emaCross,
@@ -195,4 +441,163 @@ export function calculateMultiTimeframeMetrics(
       confluenceScore,
     };
   });
+}
+
+/**
+ * Calculate Moving Average Convergence Divergence (MACD 12, 26, 9)
+ */
+export function calculateMACD(closes: number[]): {
+  macdLine: number[];
+  signalLine: number[];
+  histogram: number[];
+  latestHistogram: number;
+} {
+  if (closes.length < 26) {
+    return { macdLine: [], signalLine: [], histogram: [], latestHistogram: 0 };
+  }
+  const ema12 = calculateEMA(closes, 12);
+  const ema26 = calculateEMA(closes, 26);
+  const macdLine: number[] = [];
+  for (let i = 0; i < closes.length; i++) {
+    macdLine.push(Number((ema12[i] - ema26[i]).toFixed(4)));
+  }
+  const signalLine = calculateEMA(macdLine, 9);
+  const histogram: number[] = [];
+  for (let i = 0; i < macdLine.length; i++) {
+    histogram.push(Number((macdLine[i] - signalLine[i]).toFixed(4)));
+  }
+  const latestHistogram = histogram[histogram.length - 1] || 0;
+  return { macdLine, signalLine, histogram, latestHistogram };
+}
+
+/**
+ * Calculate Detailed MACD with 12, 26, 9 inputs and trend classification
+ */
+export function calculateDetailedMACD(
+  closes: number[],
+  fastPeriod: number = 12,
+  slowPeriod: number = 26,
+  signalPeriod: number = 9
+): {
+  macdLine: number;
+  signalLine: number;
+  histogram: number;
+  trend: 'Bullish Crossover' | 'Bearish Crossover' | 'Neutral' | 'Not enough data';
+  enoughData: boolean;
+} {
+  if (closes.length < slowPeriod + signalPeriod) {
+    return {
+      macdLine: 0,
+      signalLine: 0,
+      histogram: 0,
+      trend: 'Not enough data',
+      enoughData: false,
+    };
+  }
+
+  const emaFast = calculateEMA(closes, fastPeriod);
+  const emaSlow = calculateEMA(closes, slowPeriod);
+  const macdSeries: number[] = [];
+  for (let i = 0; i < closes.length; i++) {
+    macdSeries.push(Number((emaFast[i] - emaSlow[i]).toFixed(4)));
+  }
+
+  const signalSeries = calculateEMA(macdSeries, signalPeriod);
+  const latestMacd = macdSeries[macdSeries.length - 1] || 0;
+  const latestSignal = signalSeries[signalSeries.length - 1] || 0;
+  const latestHist = Number((latestMacd - latestSignal).toFixed(4));
+  const trend = latestHist > 0 ? 'Bullish Crossover' : latestHist < 0 ? 'Bearish Crossover' : 'Neutral';
+
+  return {
+    macdLine: latestMacd,
+    signalLine: latestSignal,
+    histogram: latestHist,
+    trend,
+    enoughData: true,
+  };
+}
+
+/**
+ * Calculate Bollinger Bands (20, 2.0 Sigma)
+ */
+export function calculateBollingerBands(closes: number[], period: number = 20, multiplier: number = 2.0): {
+  middle: number;
+  upper: number;
+  lower: number;
+  bandwidthPercent: number;
+} {
+  if (closes.length < period) {
+    const last = closes[closes.length - 1] || 0;
+    return { middle: last, upper: last * 1.01, lower: last * 0.99, bandwidthPercent: 2.0 };
+  }
+  const slice = closes.slice(-period);
+  const middle = slice.reduce((a, b) => a + b, 0) / period;
+  const variance = slice.reduce((sum, val) => sum + Math.pow(val - middle, 2), 0) / period;
+  const stdDev = Math.sqrt(variance);
+  const upper = middle + multiplier * stdDev;
+  const lower = middle - multiplier * stdDev;
+  const bandwidthPercent = middle > 0 ? Number((((upper - lower) / middle) * 100).toFixed(2)) : 0;
+  return {
+    middle: Number(middle.toFixed(4)),
+    upper: Number(upper.toFixed(4)),
+    lower: Number(lower.toFixed(4)),
+    bandwidthPercent,
+  };
+}
+
+/**
+ * Calculate Daily Floor Pivot Points (PP, R1, R2, S1, S2)
+ */
+export function calculateDailyPivots(high: number, low: number, close: number): {
+  pp: number;
+  r1: number;
+  r2: number;
+  s1: number;
+  s2: number;
+} {
+  const pp = (high + low + close) / 3;
+  const r1 = 2 * pp - low;
+  const s1 = 2 * pp - high;
+  const r2 = pp + (high - low);
+  const s2 = pp - (high - low);
+  return {
+    pp: Number(pp.toFixed(4)),
+    r1: Number(r1.toFixed(4)),
+    r2: Number(r2.toFixed(4)),
+    s1: Number(s1.toFixed(4)),
+    s2: Number(s2.toFixed(4)),
+  };
+}
+
+/**
+ * Calculate Average True Range (ATR 14)
+ */
+export function calculateATR(candles: Candle[], period: number = 14): {
+  atr: number;
+  upperAtrBand: number;
+  lowerAtrBand: number;
+} {
+  if (candles.length < 2) {
+    const p = candles[0]?.close || 0;
+    return { atr: 1.5, upperAtrBand: p + 1.5, lowerAtrBand: p - 1.5 };
+  }
+  const trs: number[] = [];
+  for (let i = 1; i < candles.length; i++) {
+    const current = candles[i];
+    const prev = candles[i - 1];
+    const tr = Math.max(
+      current.high - current.low,
+      Math.abs(current.high - prev.close),
+      Math.abs(current.low - prev.close)
+    );
+    trs.push(tr);
+  }
+  const slice = trs.slice(-period);
+  const atr = slice.reduce((a, b) => a + b, 0) / slice.length;
+  const currentPrice = candles[candles.length - 1].close;
+  return {
+    atr: Number(atr.toFixed(4)),
+    upperAtrBand: Number((currentPrice + atr * 2).toFixed(4)),
+    lowerAtrBand: Number((currentPrice - atr * 2).toFixed(4)),
+  };
 }

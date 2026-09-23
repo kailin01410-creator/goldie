@@ -80,6 +80,19 @@ export const CommandPaletteModal: React.FC<CommandPaletteProps> = ({ isOpen, onC
         },
       },
       {
+        id: 'view_goldscalp',
+        title: 'GoldScalp Terminal',
+        category: 'Signals',
+        description: 'High-frequency M1/M5 GoldScalp RSI & MACD execution engine',
+        icon: Zap,
+        shortcut: 'G',
+        badge: 'Next.js',
+        action: () => {
+          setActiveTab('goldscalp');
+          onClose();
+        },
+      },
+      {
         id: 'view_scalp',
         title: 'Scalping Terminal',
         category: 'Signals',
@@ -120,11 +133,12 @@ export const CommandPaletteModal: React.FC<CommandPaletteProps> = ({ isOpen, onC
       },
       {
         id: 'view_chart',
-        title: 'Live Chart & Order Book Depth',
+        title: 'Unified Live Studio (Charts, Indicators & Strategies)',
         category: 'Charts',
-        description: 'Multi-timeframe candlestick chart, POC/VAH/VAL & Level II depth',
+        description: 'Interactive candlestick chart with instant Liquidity Sweeps, SMC, EMA, VWAP overlays',
         icon: LineChart,
         shortcut: '6',
+        badge: 'All-in-One',
         action: () => {
           setActiveTab('chart');
           onClose();
@@ -184,7 +198,7 @@ export const CommandPaletteModal: React.FC<CommandPaletteProps> = ({ isOpen, onC
         id: 'view_settings',
         title: 'Terminal Settings & Risk Controls',
         category: 'Portfolio',
-        description: 'XM Ultra-Low spreads, risk rules, loss caps and market feeds',
+        description: 'Broker spreads, risk rules, loss caps and market feeds',
         icon: Sliders,
         shortcut: '0',
         action: () => {
@@ -195,9 +209,9 @@ export const CommandPaletteModal: React.FC<CommandPaletteProps> = ({ isOpen, onC
       // Quick Actions
       {
         id: 'action_scan_all',
-        title: 'Scan All Markets for High-Confluence Setups',
+        title: 'Scan Gold Market for High-Confluence Setups',
         category: 'Actions',
-        description: 'Batch scan XAU/USD, EUR/USD, GBP/USD, and BTC/USD simultaneously',
+        description: 'Scan live XAU/USD gold feeds, order flow and institutional confluences',
         icon: RefreshCw,
         shortcut: 'Scan',
         action: () => {

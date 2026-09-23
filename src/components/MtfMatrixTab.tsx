@@ -21,6 +21,10 @@ export const MtfMatrixTab: React.FC = () => {
     setActiveSymbol, 
     isLiveFeedActive,
     lastTickTime,
+    isMarketClosed,
+    marketClosureReason,
+    setTimeframe,
+    setActiveTab,
   } = useTrading();
 
   // Calculate overall confluence direction
@@ -74,33 +78,56 @@ export const MtfMatrixTab: React.FC = () => {
         </div>
       </div>
 
+      {/* Market Closed Full Data Transparency Notice */}
+      {isMarketClosed && (
+        <div className="p-3.5 bg-[#121824] border border-amber-500/40 rounded-xl text-xs font-mono flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-md">
+          <div className="flex items-center gap-2.5">
+            <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
+            <span className="text-slate-200">
+              <strong className="text-amber-400 uppercase">Market Closed Mode Active:</strong> Displaying full settled Gold price (${activeInstrument.currentPrice.toFixed(2)}) and complete multi-timeframe analytics (1M, 5M, 15M, 1H, 4H, 1D). Zero data is hidden or restricted.
+            </span>
+          </div>
+          <span className="px-2 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/30 text-[11px] shrink-0 font-bold">
+            All Timeframes Unlocked
+          </span>
+        </div>
+      )}
+
       {/* Main Multi-Timeframe Matrix Table */}
       <div className="bg-[#121824] border border-[#1E2638] rounded-xl overflow-hidden shadow-xl">
-        <div className="px-4 py-3 bg-[#0E131D] border-b border-[#1E2638] flex items-center justify-between">
+        <div className="px-4 py-3 bg-[#0E131D] border-b border-[#1E2638] flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2">
             <Radio className="w-4 h-4 text-emerald-400 animate-pulse" />
             <h2 className="text-xs font-mono font-bold text-white uppercase tracking-wider">
-              Live Timeframe Matrix (1M • 5M • 15M • 1H • 4H • 1D)
+              Complete Multi-Timeframe Dataset (1M • 5M • 15M • 1H • 4H • 1D)
             </h2>
+            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+              ALL DATA VISIBLE
+            </span>
           </div>
-          <span className="text-[11px] font-mono text-slate-400">
-            Tick synced • {new Date(lastTickTime).toLocaleTimeString()}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] font-mono text-slate-400">
+              {isMarketClosed ? 'Market Closed: Settled Quotes' : `Tick synced • ${new Date(lastTickTime).toLocaleTimeString()}`}
+            </span>
+          </div>
         </div>
 
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs font-mono">
             <thead>
               <tr className="border-b border-[#1E2638] text-slate-400 text-[11px] bg-[#0B0E14]/60">
-                <th className="py-3 px-4">Timeframe</th>
-                <th className="py-3 px-4">Live % Change</th>
-                <th className="py-3 px-4">Change in Pips</th>
-                <th className="py-3 px-4">Trend Status</th>
-                <th className="py-3 px-4">RSI (14)</th>
-                <th className="py-3 px-4">EMA Alignment</th>
-                <th className="py-3 px-4">VWAP Position</th>
-                <th className="py-3 px-4">Volume Delta</th>
-                <th className="py-3 px-4">Confluence</th>
+                <th className="py-3 px-3">Timeframe</th>
+                <th className="py-3 px-3">Settled Price</th>
+                <th className="py-3 px-3">Open / High / Low</th>
+                <th className="py-3 px-3">Live % Change</th>
+                <th className="py-3 px-3">Change (Pips)</th>
+                <th className="py-3 px-3">Trend Bias</th>
+                <th className="py-3 px-3">RSI (14)</th>
+                <th className="py-3 px-3">EMA (9/21/50)</th>
+                <th className="py-3 px-3">VWAP Position</th>
+                <th className="py-3 px-3">Volume Delta</th>
+                <th className="py-3 px-3">Confluence</th>
+                <th className="py-3 px-3 text-right">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#1A2234]">
@@ -109,14 +136,28 @@ export const MtfMatrixTab: React.FC = () => {
                 return (
                   <tr key={metric.timeframe} className="hover:bg-[#161F30]/60 transition-colors">
                     {/* Timeframe Label */}
-                    <td className="py-3 px-4 font-bold text-white">
+                    <td className="py-3 px-3 font-bold text-white">
                       <span className="px-2 py-1 rounded bg-[#0B0E14] border border-[#232D42] text-amber-300">
                         {metric.label}
                       </span>
                     </td>
 
+                    {/* Settled Price */}
+                    <td className="py-3 px-3 font-bold text-slate-100">
+                      ${metric.close.toFixed(2)}
+                    </td>
+
+                    {/* Open / High / Low */}
+                    <td className="py-3 px-3 text-[11px] text-slate-300">
+                      <div>O: <span className="text-slate-400">${metric.open.toFixed(2)}</span></div>
+                      <div className="flex gap-2">
+                        <span className="text-emerald-400">H: ${metric.high.toFixed(2)}</span>
+                        <span className="text-rose-400">L: ${metric.low.toFixed(2)}</span>
+                      </div>
+                    </td>
+
                     {/* Live % Change */}
-                    <td className="py-3 px-4 font-bold">
+                    <td className="py-3 px-3 font-bold">
                       <div className="flex items-center gap-1.5">
                         {isPositive ? (
                           <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
@@ -132,14 +173,14 @@ export const MtfMatrixTab: React.FC = () => {
                     </td>
 
                     {/* Change in Pips */}
-                    <td className="py-3 px-4 font-semibold">
+                    <td className="py-3 px-3 font-semibold">
                       <span className={isPositive ? 'text-emerald-400' : 'text-rose-400'}>
                         {isPositive ? '+' : ''}{metric.changePips} pips
                       </span>
                     </td>
 
                     {/* Trend Status */}
-                    <td className="py-3 px-4">
+                    <td className="py-3 px-3">
                       <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                         metric.trend === 'STRONG_BULL'
                           ? 'bg-emerald-500 text-black'
@@ -156,14 +197,14 @@ export const MtfMatrixTab: React.FC = () => {
                     </td>
 
                     {/* RSI */}
-                    <td className="py-3 px-4">
+                    <td className="py-3 px-3">
                       <div className="flex items-center gap-2">
                         <span className={`font-bold ${
                           metric.rsi > 70 ? 'text-rose-400' : metric.rsi < 30 ? 'text-emerald-400' : 'text-slate-300'
                         }`}>
                           {metric.rsi}
                         </span>
-                        <div className="w-12 h-1.5 bg-[#0B0E14] rounded-full overflow-hidden hidden sm:block">
+                        <div className="w-10 h-1.5 bg-[#0B0E14] rounded-full overflow-hidden hidden sm:block">
                           <div 
                             className={`h-full ${metric.rsi > 50 ? 'bg-emerald-400' : 'bg-rose-400'}`} 
                             style={{ width: `${metric.rsi}%` }}
@@ -173,16 +214,16 @@ export const MtfMatrixTab: React.FC = () => {
                     </td>
 
                     {/* EMA Alignment */}
-                    <td className="py-3 px-4">
+                    <td className="py-3 px-3">
                       <span className={`text-[11px] ${
                         metric.emaCross === 'BULLISH' ? 'text-emerald-400' : metric.emaCross === 'BEARISH' ? 'text-rose-400' : 'text-slate-400'
                       }`}>
-                        {metric.emaCross === 'BULLISH' ? '9 > 21 > 50 Bullish' : metric.emaCross === 'BEARISH' ? '9 < 21 < 50 Bearish' : 'Consolidating'}
+                        {metric.emaCross === 'BULLISH' ? '9 > 21 > 50 Bull' : metric.emaCross === 'BEARISH' ? '9 < 21 < 50 Bear' : 'Neutral'}
                       </span>
                     </td>
 
                     {/* VWAP */}
-                    <td className="py-3 px-4">
+                    <td className="py-3 px-3">
                       <span className={`text-[11px] px-1.5 py-0.5 rounded ${
                         metric.vwapStatus === 'ABOVE' ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/30' : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
                       }`}>
@@ -191,23 +232,38 @@ export const MtfMatrixTab: React.FC = () => {
                     </td>
 
                     {/* Volume Delta */}
-                    <td className="py-3 px-4">
+                    <td className="py-3 px-3">
                       <span className={metric.volumeBias === 'ACCUMULATION' ? 'text-emerald-400' : 'text-rose-400'}>
                         {metric.volumeBias}
                       </span>
+                      <div className="text-[10px] text-slate-500">{metric.volume.toLocaleString()} vol</div>
                     </td>
 
                     {/* Confluence Score */}
-                    <td className="py-3 px-4">
+                    <td className="py-3 px-3">
                       <div className="flex items-center gap-1.5">
                         <span className="font-bold text-amber-300">{metric.confluenceScore}%</span>
-                        <div className="w-10 h-1.5 bg-[#0B0E14] rounded-full overflow-hidden">
+                        <div className="w-8 h-1.5 bg-[#0B0E14] rounded-full overflow-hidden">
                           <div 
                             className="h-full bg-amber-400" 
                             style={{ width: `${metric.confluenceScore}%` }}
                           />
                         </div>
                       </div>
+                    </td>
+
+                    {/* Quick View Chart Action */}
+                    <td className="py-3 px-3 text-right">
+                      <button
+                        onClick={() => {
+                          setTimeframe(metric.timeframe);
+                          setActiveTab('chart');
+                        }}
+                        className="px-2.5 py-1 rounded bg-[#0B0E14] hover:bg-amber-500 hover:text-black text-slate-300 border border-[#232D42] text-[11px] transition-colors cursor-pointer"
+                        title={`Load ${metric.label} chart`}
+                      >
+                        Chart →
+                      </button>
                     </td>
 
                   </tr>

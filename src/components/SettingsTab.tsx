@@ -13,10 +13,12 @@ import {
   FolderArchive,
   Shield,
   Activity,
-  AlertTriangle
+  AlertTriangle,
+  HelpCircle,
+  ExternalLink
 } from 'lucide-react';
-import { useTrading, XM_BROKER_PRESETS } from '../context/TradingContext';
-import { XmBrokerTier } from '../types';
+import { useTrading, BROKER_PRESETS } from '../context/TradingContext';
+import { BrokerTier } from '../types';
 
 export const SettingsTab: React.FC = () => {
   const { 
@@ -24,8 +26,11 @@ export const SettingsTab: React.FC = () => {
     updateAdminRiskSettings,
     goldDataSource,
     goldApiKey,
+    goldApiNotice,
     setGoldApiKey,
     refreshGoldPrice,
+    testGoldApiKey,
+    calibrateGoldQuote,
     lastGoldSyncTime,
     instruments,
     isOnline,
@@ -36,14 +41,21 @@ export const SettingsTab: React.FC = () => {
     setIsDownloadModalOpen,
     xmBrokerTier,
     goldSpreadPips,
-    updateXmSpread,
-    setIsXmModalOpen
+    updateXmSpread
   } = useTrading();
 
   // GoldAPI state
   const [goldKeyInput, setGoldKeyInput] = useState<string>(goldApiKey || adminProfile.goldApiKey || '');
   const [goldSyncFeedback, setGoldSyncFeedback] = useState<string | null>(null);
   const [isSyncingGold, setIsSyncingGold] = useState<boolean>(false);
+  const [isTestingKey, setIsTestingKey] = useState<boolean>(false);
+  const [testKeyResult, setTestKeyResult] = useState<{ success: boolean; message: string; status: string; price?: number; error?: string } | null>(null);
+  const [showPriceDifferenceGuide, setShowPriceDifferenceGuide] = useState<boolean>(false);
+
+  const goldInstrument = instruments.find(i => i.symbol === 'XAU/USD') || instruments[0];
+  const [manualPrice, setManualPrice] = useState<string>(() => goldInstrument.currentPrice.toFixed(2));
+  const [manualPct, setManualPct] = useState<string>(() => goldInstrument.change24h.toFixed(2));
+  const [quoteMatchNotice, setQuoteMatchNotice] = useState<string | null>(null);
 
   // Network test state
   const [isPinging, setIsPinging] = useState<boolean>(false);
@@ -53,13 +65,11 @@ export const SettingsTab: React.FC = () => {
   const [riskSettings, setRiskSettings] = useState({
     maxDailyDrawdownPercent: adminProfile.maxDailyDrawdownPercent,
     defaultLotSize: adminProfile.defaultLotSize,
-    accountLeverage: adminProfile.accountLeverage,
+    accountLeverage: adminProfile.accountLeverage || 1000,
     riskPerTradePercent: adminProfile.riskPerTradePercent,
     slippageSimulationPips: adminProfile.slippageSimulationPips,
   });
   const [riskSavedNotice, setRiskSavedNotice] = useState<boolean>(false);
-
-  const goldInstrument = instruments.find(i => i.symbol === 'XAU/USD') || instruments[0];
 
   // Save Gold API key
   const handleSaveGoldApiKey = (e: React.FormEvent) => {
@@ -70,6 +80,30 @@ export const SettingsTab: React.FC = () => {
       setGoldSyncFeedback(null);
       refreshGoldPrice();
     }, 2000);
+  };
+
+  // Direct test of GoldAPI key
+  const handleTestKey = async () => {
+    setIsTestingKey(true);
+    setTestKeyResult(null);
+    try {
+      const res = await testGoldApiKey(goldKeyInput);
+      setTestKeyResult(res);
+    } finally {
+      setIsTestingKey(false);
+    }
+  };
+
+  // Quick Terminal Quote Matcher
+  const handleCalibrateTerminal = (e: React.FormEvent) => {
+    e.preventDefault();
+    const priceNum = parseFloat(manualPrice);
+    const pctNum = parseFloat(manualPct);
+    if (!isNaN(priceNum) && priceNum > 0) {
+      calibrateGoldQuote(priceNum, !isNaN(pctNum) ? pctNum : undefined);
+      setQuoteMatchNotice('Synced to Terminal quote!');
+      setTimeout(() => setQuoteMatchNotice(null), 3000);
+    }
   };
 
   // Sync Gold price now
@@ -117,7 +151,7 @@ export const SettingsTab: React.FC = () => {
                 </span>
               </h1>
               <p className="text-xs text-slate-400">
-                Configure XM Ultra-Low spreads, risk management thresholds, live market data feeds, and device installation.
+                Configure broker spreads, risk management thresholds, live market data feeds, and device installation.
               </p>
             </div>
           </div>
@@ -135,7 +169,7 @@ export const SettingsTab: React.FC = () => {
         </div>
       </div>
 
-      {/* Grid: Market Feeds & XM Broker */}
+      {/* Grid: Market Feeds & Broker Spread */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         
         {/* Live Gold Feed Card (GoldAPI.io) */}
@@ -158,6 +192,16 @@ export const SettingsTab: React.FC = () => {
               </span>
             </div>
             <div className="flex justify-between text-[11px]">
+              <span className="text-slate-400">24h Day Change:</span>
+              <span className={`font-bold ${goldInstrument.change24h >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {goldInstrument.change24h >= 0 ? '+' : ''}{goldInstrument.change24h.toFixed(2)}% ({goldInstrument.change24hPips >= 0 ? '+' : ''}{goldInstrument.change24hPips} pips)
+              </span>
+            </div>
+            <div className="flex justify-between text-[11px]">
+              <span className="text-slate-400">Day Open Anchor:</span>
+              <span className="text-slate-300 font-mono">${goldInstrument.open24h ? goldInstrument.open24h.toFixed(2) : 'N/A'}</span>
+            </div>
+            <div className="flex justify-between text-[11px]">
               <span className="text-slate-400">Bid / Ask Spread:</span>
               <span className="text-slate-300">${goldInstrument.bid.toFixed(2)} / ${goldInstrument.ask.toFixed(2)}</span>
             </div>
@@ -171,23 +215,131 @@ export const SettingsTab: React.FC = () => {
             </div>
           </div>
 
+          {/* Quick Direct Quote Matcher */}
+          <form onSubmit={handleCalibrateTerminal} className="p-2.5 bg-amber-950/20 border border-amber-500/30 rounded-lg mb-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-bold text-amber-300 uppercase">Direct MT4/MT5 Quote Match</span>
+              {quoteMatchNotice && (
+                <span className="text-[10px] text-emerald-400 font-bold">{quoteMatchNotice}</span>
+              )}
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-[9px] text-slate-400 block">Terminal Spot Price ($)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={manualPrice}
+                  onChange={(e) => setManualPrice(e.target.value)}
+                  className="w-full bg-[#0B0E14] border border-[#232D42] rounded px-2 py-1 text-white text-xs font-mono focus:outline-none focus:border-amber-400"
+                />
+              </div>
+              <div>
+                <label className="text-[9px] text-slate-400 block">Daily % Change</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={manualPct}
+                  onChange={(e) => setManualPct(e.target.value)}
+                  className="w-full bg-[#0B0E14] border border-[#232D42] rounded px-2 py-1 text-white text-xs font-mono focus:outline-none focus:border-amber-400"
+                />
+              </div>
+            </div>
+            <button
+              type="submit"
+              className="w-full py-1.5 rounded bg-amber-500 hover:bg-amber-400 text-black font-bold text-[10px] uppercase cursor-pointer"
+            >
+              Sync All Charts & Alerts to Quote
+            </button>
+          </form>
+
+          {/* Live GoldAPI Quota & Feed Status Notice */}
+          {goldApiNotice && (
+            <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg text-xs space-y-1.5 mb-3">
+              <div className="flex items-center gap-1.5 text-amber-300 font-bold">
+                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                <span>GoldAPI Feed Diagnostic Status</span>
+              </div>
+              <p className="text-[11px] text-amber-200/90 leading-relaxed font-mono">
+                {goldApiNotice}
+              </p>
+              <p className="text-[10px] text-slate-400 leading-normal">
+                Notice: Free GoldAPI accounts have a monthly limit. When reached, this terminal automatically fails over to the continuous institutional market feed so price feeds and trading never stall.
+              </p>
+            </div>
+          )}
+
           <form onSubmit={handleSaveGoldApiKey} className="space-y-3">
             <div>
-              <label className="text-slate-300 block mb-1">
-                GoldAPI.io API Key (Optional)
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-slate-300 block">
+                  GoldAPI.io API Key (Optional)
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowPriceDifferenceGuide(!showPriceDifferenceGuide)}
+                  className="text-[10px] text-amber-400 hover:text-amber-300 flex items-center gap-1 cursor-pointer"
+                >
+                  <HelpCircle className="w-3 h-3" />
+                  <span>Why do gold prices differ?</span>
+                </button>
+              </div>
               <input
                 type="password"
                 id="settings-goldapi-key-input"
                 value={goldKeyInput}
                 onChange={(e) => setGoldKeyInput(e.target.value)}
                 placeholder="Enter GOLDAPI_KEY (e.g. goldapi-12345...)"
-                className="w-full bg-[#0B0E14] border border-[#232D42] rounded-lg px-3 py-2 text-white focus:outline-none focus:border-amber-500 text-xs"
+                className="w-full bg-[#0B0E14] border border-[#232D42] rounded-lg px-3 py-2 text-white focus:outline-none focus:border-amber-500 text-xs font-mono"
               />
               <span className="text-[10px] text-slate-500 block mt-1">
-                Leave blank to automatically use institutional spot physical ticker.
+                Enter your key from goldapi.io, or leave blank to use the free institutional market feed.
               </span>
             </div>
+
+            {/* Test Key Result */}
+            {testKeyResult && (
+              <div className={`p-2.5 rounded-lg border text-xs ${
+                testKeyResult.status === 'ACTIVE_AND_VALID' 
+                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' 
+                  : 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+              }`}>
+                <div className="font-bold mb-0.5 flex items-center gap-1.5">
+                  {testKeyResult.status === 'ACTIVE_AND_VALID' ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                  ) : (
+                    <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                  )}
+                  <span>Status: {testKeyResult.status}</span>
+                </div>
+                <div className="text-[11px] opacity-90">{testKeyResult.message}</div>
+                {testKeyResult.price && (
+                  <div className="text-[10px] mt-1 text-slate-300">
+                    Live GoldAPI Quote: <strong className="text-amber-300">${testKeyResult.price.toFixed(2)}</strong>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Why Prices Differ Explanation Box */}
+            {showPriceDifferenceGuide && (
+              <div className="p-3 bg-[#0B0E14] border border-[#232D42] rounded-lg space-y-2 text-[11px] text-slate-300 leading-relaxed">
+                <div className="text-amber-400 font-bold uppercase text-[10px]">
+                  Understanding Gold Price Differences Across Feeds
+                </div>
+                <div className="space-y-1.5 text-slate-400 text-[10px]">
+                  <div>
+                    <strong className="text-slate-200">1. Spot (Cash XAU/USD) vs. COMEX Futures:</strong> Cash spot represents immediate physical settlement. Futures exchanges (COMEX GC=F) include carrying cost & contract settlement premiums, often trading $2 to $15 different.
+                  </div>
+                  <div>
+                    <strong className="text-slate-200">2. Broker Liquidity & Spreads:</strong> Retail CFD brokers pool quotes from their own Tier-1 liquidity providers (banks) and add spread (e.g. 3.5 pips on standard accounts). No two brokers have the exact same quote to the cent.
+                  </div>
+                  <div>
+                    <strong className="text-slate-200">3. GoldAPI.io Quota:</strong> GoldAPI.io is a separate third-party vendor. Free tier keys have monthly limits. If your key reaches its quota, the terminal smoothly switches to the free live futures/spot feed.
+                  </div>
+                </div>
+              </div>
+            )}
 
             {goldSyncFeedback && (
               <div className="p-2 rounded bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-[11px] flex items-center gap-1.5">
@@ -196,19 +348,29 @@ export const SettingsTab: React.FC = () => {
               </div>
             )}
 
-            <div className="flex items-center gap-2 pt-1">
+            <div className="flex flex-wrap items-center gap-2 pt-1">
               <button
                 type="submit"
                 className="flex-1 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-black font-bold text-xs uppercase transition-all shadow-md active:scale-98 cursor-pointer"
               >
-                Save Gold Feed Key
+                Save Key
+              </button>
+
+              <button
+                type="button"
+                onClick={handleTestKey}
+                disabled={isTestingKey}
+                className="px-3 py-2 rounded-lg bg-[#1A2234] hover:bg-[#232D42] text-amber-300 border border-amber-500/30 text-xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <Activity className={`w-3.5 h-3.5 ${isTestingKey ? 'animate-pulse text-amber-400' : ''}`} />
+                <span>{isTestingKey ? 'Testing...' : 'Test Key'}</span>
               </button>
 
               <button
                 type="button"
                 onClick={handleForceSyncGold}
                 disabled={isSyncingGold}
-                className="px-3 py-2 rounded-lg bg-[#1A2234] hover:bg-[#232D42] text-amber-300 border border-amber-500/30 text-xs flex items-center gap-1.5 cursor-pointer"
+                className="px-3 py-2 rounded-lg bg-[#1A2234] hover:bg-[#232D42] text-slate-300 border border-[#232D42] text-xs flex items-center gap-1.5 cursor-pointer"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isSyncingGold ? 'animate-spin' : ''}`} />
                 <span>Sync Now</span>
@@ -217,26 +379,23 @@ export const SettingsTab: React.FC = () => {
           </form>
         </div>
 
-        {/* XM Broker Spread & Ultra-Low Calibration Card */}
+        {/* Broker Spread Calibration Card */}
         <div className="bg-[#121824] border border-sky-500/30 rounded-xl p-5 shadow-xl font-mono text-xs">
           <div className="flex items-center justify-between pb-3 border-b border-[#1E2638] mb-3">
             <div className="flex items-center gap-2">
               <Zap className="w-4 h-4 text-sky-400" />
-              <h2 className="text-sm font-bold text-white uppercase">XM Broker Calibration</h2>
+              <h2 className="text-sm font-bold text-white uppercase">Broker Spread Calibration</h2>
             </div>
-            <button
-              onClick={() => setIsXmModalOpen(true)}
-              className="text-[10px] text-sky-400 hover:text-sky-300 underline cursor-pointer"
-            >
-              Open Guide
-            </button>
+            <span className="text-[10px] text-sky-400/80 font-mono">
+              Dynamic Pip Engine
+            </span>
           </div>
 
           <div className="bg-[#0B0E14] p-3 rounded-lg border border-[#1E2638] mb-3 space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-slate-400">Current Account Tier:</span>
               <span className="px-2 py-0.5 rounded bg-sky-500/20 text-sky-300 border border-sky-500/40 text-[11px] font-bold">
-                {XM_BROKER_PRESETS[xmBrokerTier]?.label || xmBrokerTier}
+                {BROKER_PRESETS[xmBrokerTier]?.label || xmBrokerTier}
               </span>
             </div>
             <div className="flex items-center justify-between">
@@ -246,30 +405,33 @@ export const SettingsTab: React.FC = () => {
               </span>
             </div>
             <p className="text-[10px] text-slate-400 leading-tight">
-              {XM_BROKER_PRESETS[xmBrokerTier]?.description || 'Optimized for high-frequency scalping.'}
+              {BROKER_PRESETS[xmBrokerTier]?.description || 'Optimized for high-frequency scalping.'}
             </p>
           </div>
 
           {/* Tier Selection Buttons */}
           <div className="space-y-2 mb-3">
-            <label className="text-slate-300 block">Select XM Account Type</label>
+            <div className="flex items-center justify-between">
+              <label className="text-slate-300 block">Select Account Tier</label>
+              <span className="text-[10px] text-amber-400 font-mono font-semibold">Active: Standard (1000:1)</span>
+            </div>
             <div className="grid grid-cols-3 gap-2">
-              {(['XM_ULTRA_LOW', 'XM_STANDARD', 'XM_MICRO'] as XmBrokerTier[]).map((tier) => (
+              {(['STANDARD', 'ULTRA_LOW', 'MICRO'] as BrokerTier[]).map((tier) => (
                 <button
                   key={tier}
                   type="button"
-                  onClick={() => updateXmSpread(tier, XM_BROKER_PRESETS[tier].spreadPips)}
+                  onClick={() => updateXmSpread(tier, BROKER_PRESETS[tier].spreadPips)}
                   className={`p-2 rounded-lg border text-center transition-all cursor-pointer ${
-                    xmBrokerTier === tier
-                      ? 'bg-sky-500/20 text-sky-300 border-sky-400 font-bold shadow-sm'
+                    xmBrokerTier === tier || (xmBrokerTier === 'XM_STANDARD' && tier === 'STANDARD') || (xmBrokerTier === 'XM_ULTRA_LOW' && tier === 'ULTRA_LOW') || (xmBrokerTier === 'XM_MICRO' && tier === 'MICRO')
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-400 font-bold shadow-sm'
                       : 'bg-[#0B0E14] text-slate-400 border-[#232D42] hover:bg-[#1A2234]'
                   }`}
                 >
-                  <div className="text-[11px]">
-                    {tier === 'XM_ULTRA_LOW' ? 'Ultra-Low' : tier === 'XM_STANDARD' ? 'Standard' : 'Micro'}
+                  <div className="text-[11px] font-bold">
+                    {tier === 'STANDARD' ? 'Standard (1000:1)' : tier === 'ULTRA_LOW' ? 'Ultra-Low' : 'Micro'}
                   </div>
-                  <div className="text-[10px] text-slate-500">
-                    {XM_BROKER_PRESETS[tier].spreadPips} pips
+                  <div className="text-[10px] text-slate-400">
+                    {BROKER_PRESETS[tier].spreadPips} pips
                   </div>
                 </button>
               ))}
@@ -353,14 +515,14 @@ export const SettingsTab: React.FC = () => {
                 <span className="text-white font-bold">1 : {riskSettings.accountLeverage}</span>
               </div>
               <div className="flex items-center gap-2">
-                {[50, 100, 200, 500].map(lev => (
+                {[100, 200, 500, 1000].map(lev => (
                   <button
                     key={lev}
                     type="button"
                     onClick={() => setRiskSettings(s => ({ ...s, accountLeverage: lev }))}
                     className={`flex-1 py-1.5 rounded border text-xs cursor-pointer transition-all ${
                       riskSettings.accountLeverage === lev
-                        ? 'bg-blue-600 text-white font-bold border-blue-500 shadow-sm'
+                        ? 'bg-amber-500 text-black font-bold border-amber-400 shadow-sm'
                         : 'bg-[#0B0E14] text-slate-300 border-[#232D42] hover:bg-[#1A2234]'
                     }`}
                   >
