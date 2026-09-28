@@ -30,7 +30,11 @@ export const TechnicalAnalysisPanel: React.FC = () => {
   const [rsiPeriod, setRsiPeriod] = useState<number>(14);
   const [atrPeriod, setAtrPeriod] = useState<number>(14);
 
-  const closes = useMemo(() => candles.map(c => c.close), [candles]);
+  const lastBarTime = candles.length > 0 ? candles[candles.length - 1].time : 0;
+  // Quantize micro-ticks into 50-cent brackets to prevent CPU thrashing while keeping quotes crisp
+  const priceBracket = Math.round((activeInstrument.currentPrice || 0) * 2);
+
+  const closes = useMemo(() => candles.map(c => c.close), [candles.length, lastBarTime, priceBracket]);
 
   // 1. Moving Averages
   const sma20 = useMemo(() => {
@@ -64,7 +68,7 @@ export const TechnicalAnalysisPanel: React.FC = () => {
   // 4. ATR (14)
   const atrResult = useMemo(() => {
     return calculateATR(candles, atrPeriod);
-  }, [candles, atrPeriod]);
+  }, [candles.length, lastBarTime, priceBracket, atrPeriod]);
 
   // 5. Support & Resistance (Pivot Levels R2, R1, PP, S1, S2)
   const pivots = useMemo(() => {
@@ -77,7 +81,7 @@ export const TechnicalAnalysisPanel: React.FC = () => {
   // 6. Recent Swing High & Swing Low
   const swings = useMemo(() => {
     return detectSwingHighsAndLows(candles, 4);
-  }, [candles]);
+  }, [candles.length, lastBarTime, priceBracket]);
 
   const currentPrice = activeInstrument.currentPrice;
 

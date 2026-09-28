@@ -3,7 +3,8 @@ import {
   Activity,
   ShieldCheck,
   Zap,
-  Globe
+  Globe,
+  Bell
 } from 'lucide-react';
 import { useTrading } from '../../context/TradingContext';
 import { FluidLiveChart } from '../chart/FluidLiveChart';
@@ -14,7 +15,8 @@ export const LiveChartPanel: React.FC = () => {
     goldDataSource,
     isMarketClosed,
     goldApiKey,
-    goldApiNotice
+    goldApiNotice,
+    setIsPriceAlertModalOpen
   } = useTrading();
 
   const isUp = activeInstrument.change24h >= 0;
@@ -50,6 +52,17 @@ export const LiveChartPanel: React.FC = () => {
               {goldDataSource.includes('GoldAPI') ? 'GoldAPI.io Feed' : 'Live Institutional Spot'}
             </span>
           </div>
+
+          {/* Quick Set Price Alert Button */}
+          <button
+            type="button"
+            onClick={() => setIsPriceAlertModalOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/35 hover:border-amber-400 text-amber-300 font-mono text-xs font-semibold transition-all cursor-pointer shadow-sm"
+            title="Set Target Price Alert for XAU/USD"
+          >
+            <Bell className="w-3.5 h-3.5 text-amber-400" />
+            <span>Set Alert</span>
+          </button>
 
           {/* Market Status Tag */}
           <div className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-mono font-semibold border ${

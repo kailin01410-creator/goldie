@@ -92,6 +92,8 @@ export const FluidLiveChart: React.FC = () => {
   const [isAutoscale, setIsAutoscale] = useState<boolean>(true);
   const [activeHudCandle, setActiveHudCandle] = useState<Candle | null>(null);
   const [barCountdown, setBarCountdown] = useState<string>('');
+  const lastHudTimeRef = useRef<number | null>(null);
+  const renderRequestedRef = useRef<boolean>(false);
 
   // Live countdown to current bar completion across all 16 timeframes
   useEffect(() => {
@@ -175,17 +177,20 @@ export const FluidLiveChart: React.FC = () => {
     return calculateDailyPivots(high, low, close);
   }, [activeInstrument.high24h, activeInstrument.low24h, activeInstrument.currentPrice]);
 
+  const lastBarTime = candles.length > 0 ? candles[candles.length - 1].time : 0;
+  const priceBracket = Math.round((activeInstrument.currentPrice || 0) * 2);
+
   // Detected Swing High / Low for Purple S/R zones
   const swings = useMemo(() => {
     return detectSwingHighsAndLows(candles, 4);
-  }, [candles]);
+  }, [candles.length, lastBarTime, priceBracket]);
 
   // Technical series across all bars
-  const closes = useMemo(() => candles.map(c => c.close), [candles]);
+  const closes = useMemo(() => candles.map(c => c.close), [candles.length, lastBarTime, priceBracket]);
   const sma20 = useMemo(() => (showSma20 ? calculateSMA(closes, 20) : []), [closes, showSma20]);
   const ema50 = useMemo(() => (showEma50 ? calculateEMA(closes, 50) : []), [closes, showEma50]);
   const ema200 = useMemo(() => (showEma200 ? calculateEMA(closes, 200) : []), [closes, showEma200]);
-  const vwapData = useMemo(() => (showVwap ? calculateVWAP(candles) : null), [candles, showVwap]);
+  const vwapData = useMemo(() => (showVwap ? calculateVWAP(candles) : null), [candles.length, lastBarTime, priceBracket, showVwap]);
 
   // Initialize or snap viewport on candle array change or timeframe switch
   useEffect(() => {
@@ -684,8 +689,21 @@ export const FluidLiveChart: React.FC = () => {
       candle: candleAtCursor,
     };
 
-    setActiveHudCandle(candleAtCursor || null);
-    renderFrame();
+    // Only trigger React state update if the bar under cursor actually changed
+    const cTime = candleAtCursor?.time ?? null;
+    if (cTime !== lastHudTimeRef.current) {
+      lastHudTimeRef.current = cTime;
+      setActiveHudCandle(candleAtCursor || null);
+    }
+
+    // Schedule 60fps canvas draw without choking the JavaScript event loop
+    if (!renderRequestedRef.current) {
+      renderRequestedRef.current = true;
+      requestAnimationFrame(() => {
+        renderFrame();
+        renderRequestedRef.current = false;
+      });
+    }
   }, [getPlotBox, candles, renderFrame]);
 
   // Mouse Up: Terminate Drag
@@ -697,6 +715,7 @@ export const FluidLiveChart: React.FC = () => {
   const handleMouseLeave = useCallback(() => {
     dragRef.current.isDragging = false;
     viewportRef.current.crosshair = null;
+    lastHudTimeRef.current = null;
     setActiveHudCandle(null);
     renderFrame();
   }, [renderFrame]);

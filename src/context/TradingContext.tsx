@@ -17,10 +17,15 @@ import {
   IndicatorBacktestReport,
   StrategyPersistenceConfig,
   AngelProject,
-  GoldMemoryItem
+  GoldMemoryItem,
+  PriceAlert,
+  PriceAlertNotification,
+  PriceAlertDirection
 } from '../types';
+import { soundAlertService } from '../utils/audioAlerts';
+import { saveMemoriesToIndexedDb, loadMemoriesFromIndexedDb } from '../utils/indexedDbStorage';
 import { INITIAL_ANGEL_PROJECTS } from '../data/angelProjects';
-import { INITIAL_GOLD_MEMORIES } from '../data/goldMemoryData';
+import { INITIAL_GOLD_MEMORIES, mergeAllMemoriesIntoAngelX, ANGEL_X_MASTER_FILE } from '../data/goldMemoryData';
 import { INITIAL_INSTRUMENTS } from '../data/instruments';
 import { getDominionTimeframe } from '../data/timeframes';
 import { generateCandles, calculateMultiTimeframeMetrics } from '../utils/technicalAnalysis';
@@ -225,10 +230,29 @@ interface TradingContextType {
   // Gold Memory Data & Knowledge Base
   goldMemories: GoldMemoryItem[];
   addGoldMemory: (item: Omit<GoldMemoryItem, 'id' | 'createdAt' | 'updatedAt'>) => GoldMemoryItem;
+  addGoldMemoriesBatch: (items: Omit<GoldMemoryItem, 'id' | 'createdAt' | 'updatedAt'>[]) => GoldMemoryItem[];
   updateGoldMemory: (item: GoldMemoryItem) => void;
   deleteGoldMemory: (id: string) => void;
   toggleGoldMemoryActive: (id: string) => void;
   clearAllGoldMemories: () => void;
+  consolidateAllIntoAngelX: () => void;
+  downloadAngelPackage: () => Promise<boolean>;
+  isDownloadingAngel: boolean;
+
+  // Price Alert System
+  priceAlerts: PriceAlert[];
+  alertToasts: PriceAlertNotification[];
+  isPriceAlertModalOpen: boolean;
+  setIsPriceAlertModalOpen: (open: boolean) => void;
+  addPriceAlert: (alert: Omit<PriceAlert, 'id' | 'createdAt' | 'status'>) => PriceAlert;
+  removePriceAlert: (id: string) => void;
+  togglePriceAlertActive: (id: string) => void;
+  rearmPriceAlert: (id: string) => void;
+  clearTriggeredAlerts: () => void;
+  clearAllPriceAlerts: () => void;
+  dismissAlertToast: (id: string) => void;
+  clearAllAlertToasts: () => void;
+  triggerTestAlert: (targetPrice?: number, direction?: PriceAlertDirection) => void;
 }
 
 const TradingContext = createContext<TradingContextType | undefined>(undefined);
@@ -242,6 +266,7 @@ const STRATEGY_PERSISTENCE_KEY = 'scalp_terminal_strategy_config_v2';
 const SIGNAL_FEED_STORAGE_KEY = 'scalp_terminal_signal_feed_v2';
 const OPEN_POSITIONS_STORAGE_KEY = 'scalp_terminal_open_positions_v2';
 const CLOSED_POSITIONS_STORAGE_KEY = 'scalp_terminal_closed_positions_v2';
+const PRICE_ALERTS_STORAGE_KEY = 'goldflow_price_alerts_v1';
 
 export const DEFAULT_STRATEGY_CONFIG: StrategyPersistenceConfig = {
   enabledStrategies: {
@@ -345,7 +370,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [activeSymbol, setActiveSymbolState] = useState<string>('XAU/USD');
   const [timeframe, setTimeframeState] = useState<TimeframeId>('5m');
   const [isLiveFeedActive, setIsLiveFeedActive] = useState<boolean>(true);
-  const [tickSpeedMs, setTickSpeedMs] = useState<number>(1000);
+  const [tickSpeedMs, setTickSpeedMs] = useState<number>(2000);
   const [lastTickTime, setLastTickTime] = useState<number>(Date.now());
 
   // Trading Sessions State (Asia, London, New York, Overlap)
@@ -353,9 +378,10 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [sessionClock, setSessionClock] = useState<Date>(() => new Date());
 
   useEffect(() => {
+    // Session state changes across hours, throttle check to every 15s to eliminate root context thrashing
     const timer = setInterval(() => {
       setSessionClock(new Date());
-    }, 1000);
+    }, 15000);
     return () => clearInterval(timer);
   }, []);
 
@@ -698,17 +724,64 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const saved = localStorage.getItem(ANGEL_GOLD_MEMORIES_STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          // Remove old mock demo cards so user has a clean slate
-          const filtered = parsed.filter((m: GoldMemoryItem) => 
-            !['mem-xau-playbook', 'mem-dominion-execution', 'mem-macro-dxy-correlation', 'mem-key-price-milestones'].includes(m.id)
-          );
-          return filtered;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          // If already consolidated to single file ANGEL X:
+          if (parsed.length === 1 && (parsed[0].id === 'angel-x' || parsed[0].fileName === 'ANGEL X')) {
+            return [parsed[0]];
+          }
+          // Merge all existing / legacy items into the single master file ANGEL X
+          const consolidated = mergeAllMemoriesIntoAngelX(parsed);
+          return [consolidated];
         }
       }
     } catch {}
     return INITIAL_GOLD_MEMORIES;
   });
+
+  const safePersistMemories = useCallback((items: GoldMemoryItem[]) => {
+    // 1. Persist to high-capacity IndexedDB (hundreds of MB/GB support)
+    saveMemoriesToIndexedDb(items).catch(() => {});
+
+    // 2. Persist lightweight index to localStorage for instant synchronous hydration
+    try {
+      const lightweight = items.map(m => ({
+        ...m,
+        content: m.content && m.content.length > 8000 
+          ? m.content.slice(0, 8000) + '\n\n[... Full content persisted in IndexedDB memory database ...]' 
+          : m.content
+      }));
+      localStorage.setItem(ANGEL_GOLD_MEMORIES_STORAGE_KEY, JSON.stringify(lightweight));
+    } catch (quotaErr) {
+      console.warn('Storage quota limit hit on localStorage, safely relying on IndexedDB:', quotaErr);
+      try {
+        const minimal = items.map(m => ({
+          id: m.id,
+          title: m.title,
+          category: m.category,
+          sourceType: m.sourceType,
+          fileName: m.fileName,
+          isActive: m.isActive,
+          createdAt: m.createdAt,
+          updatedAt: m.updatedAt,
+          tags: m.tags,
+          content: m.content ? m.content.slice(0, 500) + '...' : ''
+        }));
+        localStorage.setItem(ANGEL_GOLD_MEMORIES_STORAGE_KEY, JSON.stringify(minimal));
+      } catch {}
+    }
+  }, []);
+
+  // Hydrate high-capacity memories from IndexedDB on initial mount and consolidate into single ANGEL X file
+  useEffect(() => {
+    loadMemoriesFromIndexedDb().then((idbMemories) => {
+      setGoldMemories(prev => {
+        const pool = [...prev, ...(Array.isArray(idbMemories) ? idbMemories : [])];
+        const consolidated = mergeAllMemoriesIntoAngelX(pool);
+        safePersistMemories([consolidated]);
+        return [consolidated];
+      });
+    }).catch(() => {});
+  }, [safePersistMemories]);
 
   const addGoldMemory = useCallback((itemData: Omit<GoldMemoryItem, 'id' | 'createdAt' | 'updatedAt'>) => {
     const newItem: GoldMemoryItem = {
@@ -719,33 +792,45 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
     setGoldMemories(prev => {
       const updated = [newItem, ...prev];
-      try {
-        localStorage.setItem(ANGEL_GOLD_MEMORIES_STORAGE_KEY, JSON.stringify(updated));
-      } catch {}
+      safePersistMemories(updated);
       return updated;
     });
     return newItem;
-  }, []);
+  }, [safePersistMemories]);
+
+  const addGoldMemoriesBatch = useCallback((itemsData: Omit<GoldMemoryItem, 'id' | 'createdAt' | 'updatedAt'>[]) => {
+    if (!itemsData || itemsData.length === 0) return [];
+    const newItems: GoldMemoryItem[] = itemsData.map((itemData, idx) => ({
+      ...itemData,
+      id: `mem-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 7)}`,
+      createdAt: Date.now() + idx,
+      updatedAt: Date.now() + idx,
+    }));
+
+    setGoldMemories(prev => {
+      const updated = [...newItems, ...prev];
+      safePersistMemories(updated);
+      return updated;
+    });
+
+    return newItems;
+  }, [safePersistMemories]);
 
   const updateGoldMemory = useCallback((updated: GoldMemoryItem) => {
     setGoldMemories(prev => {
       const updatedList = prev.map(m => m.id === updated.id ? { ...updated, updatedAt: Date.now() } : m);
-      try {
-        localStorage.setItem(ANGEL_GOLD_MEMORIES_STORAGE_KEY, JSON.stringify(updatedList));
-      } catch {}
+      safePersistMemories(updatedList);
       return updatedList;
     });
-  }, []);
+  }, [safePersistMemories]);
 
   const deleteGoldMemory = useCallback((id: string) => {
     setGoldMemories(prev => {
       const filtered = prev.filter(m => m.id !== id);
-      try {
-        localStorage.setItem(ANGEL_GOLD_MEMORIES_STORAGE_KEY, JSON.stringify(filtered));
-      } catch {}
+      safePersistMemories(filtered);
       return filtered;
     });
-  }, []);
+  }, [safePersistMemories]);
 
   const toggleGoldMemoryActive = useCallback((id: string) => {
     setGoldMemories(prev => {
@@ -758,11 +843,215 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   }, []);
 
   const clearAllGoldMemories = useCallback(() => {
-    setGoldMemories([]);
+    setGoldMemories([ANGEL_X_MASTER_FILE]);
+    safePersistMemories([ANGEL_X_MASTER_FILE]);
+  }, [safePersistMemories]);
+
+  const consolidateAllIntoAngelX = useCallback(() => {
+    setGoldMemories(prev => {
+      const consolidated = mergeAllMemoriesIntoAngelX(prev);
+      safePersistMemories([consolidated]);
+      return [consolidated];
+    });
+  }, [safePersistMemories]);
+
+  const [isDownloadingAngel, setIsDownloadingAngel] = useState<boolean>(false);
+
+  const downloadAngelPackage = useCallback(async () => {
+    if (isDownloadingAngel) return false;
+    setIsDownloadingAngel(true);
     try {
-      localStorage.removeItem(ANGEL_GOLD_MEMORIES_STORAGE_KEY);
+      const res = await fetch('/api/angel/download-package', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          memories: goldMemories,
+          conversations: [],
+          activeProject,
+          marketContext: {
+            symbol: activeInstrument?.symbol || 'XAU/USD',
+            price: activeInstrument?.currentPrice || 4379.0,
+            timeframe
+          }
+        })
+      });
+
+      if (!res.ok) throw new Error('Download failed');
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `ANGEL-X-Package-${new Date().toISOString().slice(0, 10)}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      return true;
+    } catch (err) {
+      console.warn('POST download failed, triggering GET fallback:', err);
+      try {
+        const fallbackLink = document.createElement('a');
+        fallbackLink.href = '/api/angel/download';
+        fallbackLink.download = `ANGEL-X.zip`;
+        document.body.appendChild(fallbackLink);
+        fallbackLink.click();
+        fallbackLink.remove();
+        return true;
+      } catch (fallbackErr) {
+        console.error('All download methods failed:', fallbackErr);
+        return false;
+      }
+    } finally {
+      setIsDownloadingAngel(false);
+    }
+  }, [goldMemories, activeProject, activeInstrument, timeframe, isDownloadingAngel]);
+
+  // Price Alert System State & Methods
+  const [priceAlerts, setPriceAlerts] = useState<PriceAlert[]>(() => {
+    try {
+      const saved = localStorage.getItem(PRICE_ALERTS_STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    const defaultSpot = INITIAL_INSTRUMENTS[0].currentPrice || 3018.5;
+    return [
+      {
+        id: 'alert-xau-res-breakout',
+        symbol: 'XAU/USD',
+        targetPrice: Math.round((defaultSpot + 6.0) * 10) / 10,
+        direction: 'ABOVE',
+        status: 'ACTIVE',
+        createdAt: Date.now() - 3600000,
+        note: 'Upper Resistance Breakout Target',
+        soundEnabled: true,
+        initialPrice: defaultSpot,
+      },
+      {
+        id: 'alert-xau-sup-test',
+        symbol: 'XAU/USD',
+        targetPrice: Math.round((defaultSpot - 6.0) * 10) / 10,
+        direction: 'BELOW',
+        status: 'ACTIVE',
+        createdAt: Date.now() - 3600000,
+        note: 'Demand Zone Key Support Test',
+        soundEnabled: true,
+        initialPrice: defaultSpot,
+      }
+    ];
+  });
+
+  const [alertToasts, setAlertToasts] = useState<PriceAlertNotification[]>([]);
+  const [isPriceAlertModalOpen, setIsPriceAlertModalOpen] = useState<boolean>(false);
+
+  const addPriceAlert = useCallback((alertData: Omit<PriceAlert, 'id' | 'createdAt' | 'status'>) => {
+    const newAlert: PriceAlert = {
+      ...alertData,
+      id: `alert-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      status: 'ACTIVE',
+      createdAt: Date.now(),
+    };
+    setPriceAlerts(prev => {
+      const updated = [newAlert, ...prev];
+      try {
+        localStorage.setItem(PRICE_ALERTS_STORAGE_KEY, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+    return newAlert;
+  }, []);
+
+  const removePriceAlert = useCallback((id: string) => {
+    setPriceAlerts(prev => {
+      const updated = prev.filter(a => a.id !== id);
+      try {
+        localStorage.setItem(PRICE_ALERTS_STORAGE_KEY, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+  }, []);
+
+  const togglePriceAlertActive = useCallback((id: string) => {
+    setPriceAlerts(prev => {
+      const updated = prev.map(a => {
+        if (a.id === id) {
+          const nextStatus = a.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE';
+          return { ...a, status: nextStatus };
+        }
+        return a;
+      });
+      try {
+        localStorage.setItem(PRICE_ALERTS_STORAGE_KEY, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+  }, []);
+
+  const rearmPriceAlert = useCallback((id: string) => {
+    setPriceAlerts(prev => {
+      const updated = prev.map(a => {
+        if (a.id === id) {
+          const inst = instruments.find(i => i.symbol === a.symbol) || activeInstrument;
+          return {
+            ...a,
+            status: 'ACTIVE' as const,
+            initialPrice: inst.currentPrice,
+            triggeredAt: undefined,
+            triggeredPrice: undefined,
+          };
+        }
+        return a;
+      });
+      try {
+        localStorage.setItem(PRICE_ALERTS_STORAGE_KEY, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+  }, [instruments, activeInstrument]);
+
+  const clearTriggeredAlerts = useCallback(() => {
+    setPriceAlerts(prev => {
+      const updated = prev.filter(a => a.status !== 'TRIGGERED');
+      try {
+        localStorage.setItem(PRICE_ALERTS_STORAGE_KEY, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+  }, []);
+
+  const clearAllPriceAlerts = useCallback(() => {
+    setPriceAlerts([]);
+    try {
+      localStorage.removeItem(PRICE_ALERTS_STORAGE_KEY);
     } catch {}
   }, []);
+
+  const dismissAlertToast = useCallback((id: string) => {
+    setAlertToasts(prev => prev.filter(t => t.id !== id));
+  }, []);
+
+  const clearAllAlertToasts = useCallback(() => {
+    setAlertToasts([]);
+  }, []);
+
+  const triggerTestAlert = useCallback((customTargetPrice?: number, customDir?: PriceAlertDirection) => {
+    const currentSpot = activeInstrument.currentPrice;
+    const target = customTargetPrice !== undefined ? customTargetPrice : Math.round((currentSpot + 2.5) * 10) / 10;
+    const dir = customDir || (target >= currentSpot ? 'ABOVE' : 'BELOW');
+    const testToast: PriceAlertNotification = {
+      id: `toast-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      alertId: 'test-simulated',
+      symbol: activeInstrument.symbol,
+      targetPrice: target,
+      crossedPrice: currentSpot,
+      direction: dir,
+      timestamp: Date.now(),
+      note: 'Target Threshold Crossed (Live Test)',
+    };
+    setAlertToasts(prev => [testToast, ...prev.slice(0, 4)]);
+    soundAlertService.playChime(dir);
+  }, [activeInstrument]);
 
   // Broker spread state
   const [brokerTier, setBrokerTier] = useState<BrokerTier>(() => {
@@ -847,7 +1136,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       activeInstrument.pipMultiplier
     );
     setIndicatorBacktests(reports);
-  }, [activeInstrument.symbol, activeInstrument.currentPrice, activeInstrument.pipMultiplier, tradingStyle]);
+  }, [activeInstrument.symbol, activeInstrument.pipMultiplier, tradingStyle]);
 
   // Refresh indicator backtests when symbol or trading style changes
   useEffect(() => {
@@ -1287,6 +1576,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       // Update open paper positions PnL
       setOpenPositions(prevPositions => {
+        if (prevPositions.length === 0) return prevPositions;
         return prevPositions.map(pos => {
           const inst = instruments.find(i => i.symbol === pos.symbol) || activeInstrument;
           const price = pos.direction === 'BUY' ? inst.bid : inst.ask;
@@ -1347,6 +1637,92 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
     });
   }, [instruments, openPositions, activeInstrument]);
+
+  // Price Alert Crossing Detection Engine
+  const lastCheckedAlertPricesRef = useRef<Record<string, number>>({});
+
+  useEffect(() => {
+    instruments.forEach(inst => {
+      const lastPrice = lastCheckedAlertPricesRef.current[inst.symbol];
+      const currentPrice = inst.currentPrice;
+
+      if (lastPrice === undefined) {
+        lastCheckedAlertPricesRef.current[inst.symbol] = currentPrice;
+        return;
+      }
+
+      if (lastPrice === currentPrice) return;
+
+      // Find any active alerts for this symbol that have crossed
+      const triggeredAlertsList: { alert: PriceAlert; crossedPrice: number }[] = [];
+
+      priceAlerts.forEach(alert => {
+        if (alert.symbol === inst.symbol && alert.status === 'ACTIVE') {
+          let hasCrossed = false;
+
+          if (alert.direction === 'ABOVE') {
+            // Price crossed upward through the target threshold
+            if ((lastPrice < alert.targetPrice && currentPrice >= alert.targetPrice) ||
+                (alert.initialPrice < alert.targetPrice && currentPrice >= alert.targetPrice)) {
+              hasCrossed = true;
+            }
+          } else if (alert.direction === 'BELOW') {
+            // Price crossed downward through the target threshold
+            if ((lastPrice > alert.targetPrice && currentPrice <= alert.targetPrice) ||
+                (alert.initialPrice > alert.targetPrice && currentPrice <= alert.targetPrice)) {
+              hasCrossed = true;
+            }
+          }
+
+          if (hasCrossed) {
+            triggeredAlertsList.push({ alert, crossedPrice: currentPrice });
+          }
+        }
+      });
+
+      lastCheckedAlertPricesRef.current[inst.symbol] = currentPrice;
+
+      if (triggeredAlertsList.length > 0) {
+        setPriceAlerts(prev => {
+          const updated = prev.map(a => {
+            const match = triggeredAlertsList.find(t => t.alert.id === a.id);
+            if (match) {
+              return {
+                ...a,
+                status: 'TRIGGERED' as const,
+                triggeredAt: Date.now(),
+                triggeredPrice: match.crossedPrice,
+              };
+            }
+            return a;
+          });
+          try {
+            localStorage.setItem(PRICE_ALERTS_STORAGE_KEY, JSON.stringify(updated));
+          } catch {}
+          return updated;
+        });
+
+        // Trigger visual toast notifications
+        const newToasts: PriceAlertNotification[] = triggeredAlertsList.map(({ alert, crossedPrice }) => ({
+          id: `toast-${Date.now()}-${alert.id}`,
+          alertId: alert.id,
+          symbol: alert.symbol,
+          targetPrice: alert.targetPrice,
+          crossedPrice,
+          direction: alert.direction,
+          timestamp: Date.now(),
+          note: alert.note,
+        }));
+
+        setAlertToasts(prev => [...newToasts, ...prev].slice(0, 5));
+
+        // Play audio chime if enabled on any triggered alert
+        if (triggeredAlertsList.some(t => t.alert.soundEnabled)) {
+          soundAlertService.playChime(triggeredAlertsList[0].alert.direction);
+        }
+      }
+    });
+  }, [instruments, priceAlerts]);
 
   // Generate Pre-Backtested Signal (Scalping or Day Trading)
   const generateSignal = useCallback((preferredStrategy?: StrategyId, styleOverride?: TradingStyle) => {
@@ -1636,10 +2012,28 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setIsAngelModalOpen,
     goldMemories,
     addGoldMemory,
+    addGoldMemoriesBatch,
     updateGoldMemory,
     deleteGoldMemory,
     toggleGoldMemoryActive,
     clearAllGoldMemories,
+    consolidateAllIntoAngelX,
+    downloadAngelPackage,
+    isDownloadingAngel,
+    // Price Alert System
+    priceAlerts,
+    alertToasts,
+    isPriceAlertModalOpen,
+    setIsPriceAlertModalOpen,
+    addPriceAlert,
+    removePriceAlert,
+    togglePriceAlertActive,
+    rearmPriceAlert,
+    clearTriggeredAlerts,
+    clearAllPriceAlerts,
+    dismissAlertToast,
+    clearAllAlertToasts,
+    triggerTestAlert,
   };
 
   return (

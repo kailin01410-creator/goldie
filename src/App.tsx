@@ -10,6 +10,8 @@ import { GoldApiKeyModal } from './components/GoldApiKeyModal';
 import { SettingsModal } from './components/SettingsModal';
 import { AngelCompanionModal } from './components/angel/AngelCompanionModal';
 import { AngelFloatingButton } from './components/angel/AngelFloatingButton';
+import { PriceAlertModal } from './components/alerts/PriceAlertModal';
+import { PriceAlertToastContainer } from './components/alerts/PriceAlertToastContainer';
 
 const MainLayout: React.FC = () => {
   const { 
@@ -22,7 +24,9 @@ const MainLayout: React.FC = () => {
     isSettingsModalOpen,
     setIsSettingsModalOpen,
     isAngelModalOpen,
-    setIsAngelModalOpen
+    setIsAngelModalOpen,
+    isPriceAlertModalOpen,
+    setIsPriceAlertModalOpen
   } = useTrading();
 
   return (
@@ -50,6 +54,15 @@ const MainLayout: React.FC = () => {
           </div>
         </div>
       </footer>
+
+      {/* Real-Time Price Alert Toast Notifications */}
+      <PriceAlertToastContainer />
+
+      {/* Price Alert Threshold Configuration Modal */}
+      <PriceAlertModal
+        isOpen={isPriceAlertModalOpen}
+        onClose={() => setIsPriceAlertModalOpen(false)}
+      />
 
       {/* Network Disconnection Lockout Overlay */}
       <OfflineLockOverlay />

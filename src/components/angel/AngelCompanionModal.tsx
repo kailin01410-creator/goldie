@@ -10,12 +10,16 @@ import {
   Database, 
   Paperclip, 
   MessageSquare,
-  Download
+  Download,
+  Brain,
+  Heart
 } from 'lucide-react';
 import { useTrading } from '../../context/TradingContext';
 import { AngelChatMessage, GoldMemoryItem, AngelCommunicationConfig } from '../../types';
 import { DEFAULT_ANGEL_COMMUNICATION_CONFIG } from '../../data/angelProjects';
 import { AngelMemoryDataManager } from './AngelMemoryDataManager';
+import { AngelCommunicationTuning } from './AngelCommunicationTuning';
+import { extractFileToMemories } from '../../utils/fileExtractor';
 
 interface AngelCompanionModalProps {
   isOpen: boolean;
@@ -31,10 +35,11 @@ export const AngelCompanionModal: React.FC<AngelCompanionModalProps> = ({ isOpen
     marketClosureReason,
     activeProject,
     goldMemories,
-    addGoldMemory
+    addGoldMemory,
+    addGoldMemoriesBatch
   } = useTrading();
 
-  const [activeTab, setActiveTab] = useState<'chat' | 'memory'>('chat');
+  const [activeTab, setActiveTab] = useState<'chat' | 'memory' | 'tuning'>('chat');
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -47,7 +52,7 @@ export const AngelCompanionModal: React.FC<AngelCompanionModalProps> = ({ isOpen
   const activeMemoryCount = goldMemories.filter(m => m.isActive).length;
 
   // Communication & Etiquette Configuration
-  const [commConfig] = useState<AngelCommunicationConfig>(() => {
+  const [commConfig, setCommConfig] = useState<AngelCommunicationConfig>(() => {
     try {
       const saved = localStorage.getItem('angel_companion_comm_config_v2');
       if (saved) {
@@ -76,9 +81,9 @@ It is an honor and a true pleasure to assist you. I am your **Gold (XAU/USD) Tra
 
 * **Live Market Feed**: ${activeInstrument.symbol} at **$${activeInstrument.currentPrice.toFixed(2)}** • [${timeframe.toUpperCase()}] Resolution
 * **Active Session**: ${currentSession.activeSessionsSummary}
-* **Gold Neural Memory**: **${goldMemories.filter(m => m.isActive).length} active documents** loaded into my immediate analytical context.
+* **Gold Neural Memory**: **1 Master File (ANGEL X)** loaded into my immediate analytical context (combining all 22 master corpora, strategies & directives).
 
-I actively read and cite all your uploaded files, custom strategy rules, macro data, and trade notes. You can manage or upload files anytime in the **Memory Data** tab or using the paperclip button below. How may I best assist you today?`,
+I actively read and cite your master knowledge file **ANGEL X**, custom strategy rules, macro data, and trade notes. You can view or manage the file in the **ANGEL X Storage** tab. How may I best assist you today?`,
         timestamp: Date.now()
       }
     ];
@@ -98,7 +103,7 @@ I actively read and cite all your uploaded files, custom strategy rules, macro d
     }
   }, [messages, isOpen, activeTab]);
 
-  // Handle direct file upload from chat bar
+  // Handle direct file and zip upload from chat bar
   const handleChatFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
@@ -106,69 +111,68 @@ I actively read and cite all your uploaded files, custom strategy rules, macro d
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       try {
-        const formatSize = (bytes: number): string => {
-          if (bytes < 1024) return `${bytes} B`;
-          if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-          return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-        };
+        const isZip = file.name.toLowerCase().endsWith('.zip') || file.type.includes('zip');
+        setQuickUploadStatus(isZip ? `Unpacking archive "${file.name}"...` : `Reading "${file.name}"...`);
 
-        const fileSizeStr = formatSize(file.size);
-        const isText = file.type.startsWith('text/') || 
-          file.name.endsWith('.txt') || 
-          file.name.endsWith('.md') || 
-          file.name.endsWith('.csv') || 
-          file.name.endsWith('.json') || 
-          file.name.endsWith('.log');
+        let memories: any[] = [];
+        let summaryMessage = '';
 
-        let extractedText = '';
-        if (isText) {
-          extractedText = await file.text();
-        } else {
-          extractedText = await file.text().catch(() => '');
-          if (!extractedText || extractedText.length < 30) {
-            extractedText = `[File Document: ${file.name}]\nFormat: ${file.type || 'Document'}\nSize: ${fileSizeStr}\nTimestamp: ${new Date().toISOString()}\nUploaded for institutional Gold (XAU/USD) analysis.`;
+        try {
+          const res = await extractFileToMemories(file);
+          memories = res.memories;
+          summaryMessage = res.summaryMessage;
+        } catch (clientErr) {
+          console.warn('Browser extraction failed, using server upload engine:', clientErr);
+          setQuickUploadStatus(`Uploading "${file.name}" to ANGEL neural engine...`);
+          const serverRes = await fetch(`/api/angel/upload?filename=${encodeURIComponent(file.name)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/octet-stream' },
+            body: file
+          });
+          if (!serverRes.ok) throw new Error(`Server returned HTTP ${serverRes.status}`);
+          const data = await serverRes.json();
+          if (!data.success || !Array.isArray(data.memories) || data.memories.length === 0) {
+            throw new Error(data.message || 'No readable data extracted from file');
           }
+          memories = data.memories;
+          summaryMessage = data.summary || `✓ Indexed ${memories.length} item(s) from "${file.name}"`;
         }
 
-        const newMemoryItem: GoldMemoryItem = {
-          id: `mem-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-          title: file.name.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' '),
-          category: 'UPLOADED_DOC',
-          content: extractedText,
-          sourceType: 'FILE_UPLOAD',
-          fileName: file.name,
-          fileSize: fileSizeStr,
-          fileType: file.type || 'document',
-          isActive: true,
-          tags: ['Uploaded File', 'Gold Data'],
-          createdAt: Date.now(),
-          updatedAt: Date.now()
-        };
+        if (memories.length === 1) {
+          addGoldMemory(memories[0]);
+        } else if (memories.length > 1) {
+          addGoldMemoriesBatch(memories);
+        }
 
-        addGoldMemory(newMemoryItem);
-
-        // Notify user in chat
+        // Notify user in chat with rich intelligence summary
         setMessages(prev => [
           ...prev,
           {
-            id: `sys-upload-${Date.now()}`,
+            id: `sys-upload-${Date.now()}-${i}`,
             sender: 'angel',
-            text: `### 📁 File Indexed: "${file.name}" (${fileSizeStr})
-**I have successfully read and added "${file.name}" to my active Gold Memory Data!**
+            text: `### 📁 ${memories.length > 1 ? `Archived Intelligence Unpacked: "${file.name}"` : `Document Indexed: "${file.name}"`}
+**${summaryMessage}**
 
-* **Document Category**: \`UPLOADED_DOC\`
-* **Indexed Characters**: ${extractedText.length.toLocaleString()} characters
-* **Status**: **Active in AI Context**. I can now reference and reason over this document during all our market conversations!
+* **Total Neural Memories Added**: **${memories.length}** item(s)
+* **Categories Assigned**: ${Array.from(new Set(memories.map(m => m.category))).join(', ')}
+* **Neural Retention Status**: **Active & Permanently Saved**. I will actively reference, cross-examine, and cite these documents in our analysis against **${activeInstrument.symbol}** ($${activeInstrument.currentPrice.toFixed(2)}).
 
-*Would you like me to summarize this document or cross-check its rules against current ${activeInstrument.symbol} spot ($${activeInstrument.currentPrice.toFixed(2)})?*`,
+*How would you like to review or apply these rules to our active session, ${commConfig.userPreferredName}?*`,
             timestamp: Date.now()
           }
         ]);
 
-        setQuickUploadStatus(`✓ Indexed "${file.name}" into memory!`);
-        setTimeout(() => setQuickUploadStatus(null), 3500);
+        setQuickUploadStatus(summaryMessage);
+        setTimeout(() => setQuickUploadStatus(null), 4000);
+
+        // Automatically command ANGEL to read the file, extract its data, and execute instructions
+        setTimeout(() => {
+          handleSendMessage(`ANGEL, please read the uploaded file "${file.name}". Provide all necessary info and data from it, and execute what is requested.`);
+        }, 500);
       } catch (err: any) {
         console.error('Chat file upload failed:', err);
+        setQuickUploadStatus(`Upload failed: ${err.message || 'Could not parse file'}`);
+        setTimeout(() => setQuickUploadStatus(null), 5000);
       }
     }
 
@@ -206,6 +210,71 @@ I actively read and cite all your uploaded files, custom strategy rules, macro d
         rsi: 52
       };
 
+      // Smart memory context selection: rank by relevance and prioritize uploaded files
+      const activeList = (goldMemories || []).filter(m => m && m.isActive !== false);
+      const isAskingToReadFile = /read|file|upload|document|provide|do it|do this|dataset|data set|storage/i.test(message);
+      const queryTerms = message.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+
+      // Score items by relevance to message with high priority for uploaded files
+      const scored = activeList.map(m => {
+        let score = 0;
+        const titleLower = (m.title || '').toLowerCase();
+        const fileNameLower = (m.fileName || '').toLowerCase();
+        const catLower = (m.category || '').toLowerCase();
+        const contentLower = typeof m.content === 'string' ? m.content.toLowerCase().slice(0, 5000) : '';
+
+        // If user asks to read file or execute, heavily boost actual uploaded files
+        if (m.sourceType === 'FILE_UPLOAD') {
+          if (isAskingToReadFile) score += 60;
+          if (m.createdAt && Date.now() - m.createdAt < 86400000 * 3) {
+            score += 30;
+          }
+        }
+
+        for (const term of queryTerms) {
+          if (fileNameLower.includes(term)) score += 12;
+          if (titleLower.includes(term)) score += 6;
+          if (catLower.includes(term)) score += 3;
+          if (contentLower.includes(term)) score += 2;
+        }
+        return { item: m, score };
+      });
+
+      scored.sort((a, b) => b.score - a.score);
+
+      // Top 8 most relevant receive full content (up to 8,000 chars), remaining send compact metadata
+      const sanitizedMemories = scored.slice(0, 8).map(({ item }) => ({
+        id: item.id,
+        title: item.title,
+        category: item.category,
+        sourceType: item.sourceType,
+        fileName: item.fileName,
+        isActive: item.isActive,
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt,
+        tags: item.tags,
+        content: typeof item.content === 'string' && item.content.length > 8000
+          ? item.content.slice(0, 8000) + '\n\n[...Additional content indexed in neural memory...]'
+          : item.content
+      }));
+
+      // Append compact catalog of remaining documents so AI knows they exist
+      const remainingTitles = scored.slice(8).map(s => s.item.title);
+      if (remainingTitles.length > 0) {
+        sanitizedMemories.push({
+          id: 'catalog-index',
+          title: `Master Document Catalog (${remainingTitles.length} additional documents)`,
+          category: 'CUSTOM_DATA' as any,
+          sourceType: 'TEXT_NOTE' as any,
+          fileName: 'catalog-index',
+          isActive: true,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          tags: ['Index', 'Catalog'],
+          content: `Additional indexed active documents: ${remainingTitles.join(', ')}`
+        });
+      }
+
       const response = await fetch('/api/angel/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -216,7 +285,7 @@ I actively read and cite all your uploaded files, custom strategy rules, macro d
           history: messages.slice(-8),
           persona: 'QUANT',
           communicationConfig: commConfig,
-          memoryData: goldMemories // Pass active gold memories and uploaded files!
+          memoryData: sanitizedMemories
         })
       });
 
@@ -263,6 +332,75 @@ I am watching the order flow attentively for you. Please maintain discipline and
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const [isDownloadingPackage, setIsDownloadingPackage] = useState(false);
+
+  const handleDownloadPackage = async () => {
+    try {
+      setIsDownloadingPackage(true);
+      const res = await fetch('/api/angel/download-package', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          memories: goldMemories,
+          conversations: messages,
+          config: commConfig,
+          activeProject,
+          marketContext: {
+            symbol: activeInstrument.symbol,
+            price: activeInstrument.currentPrice,
+            timeframe,
+            session: currentSession.activeSessionsSummary,
+            marketStatus: isMarketClosed ? 'CLOSED' : 'OPEN',
+          }
+        })
+      });
+
+      if (!res.ok) {
+        throw new Error('Failed to generate archive');
+      }
+
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const dateStr = new Date().toISOString().slice(0, 10);
+      a.download = `ANGEL-X-Package-${dateStr}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+
+      setQuickUploadStatus('✓ Complete ANGEL X Master Package (.zip) downloaded successfully!');
+      setTimeout(() => setQuickUploadStatus(null), 4000);
+    } catch (err: any) {
+      console.error('Failed to download intelligence package:', err);
+      setQuickUploadStatus('✕ Failed to download package. Please retry.');
+      setTimeout(() => setQuickUploadStatus(null), 3500);
+    } finally {
+      setIsDownloadingPackage(false);
+    }
+  };
+
+  const handleSaveChatToMemory = () => {
+    if (messages.length <= 1) return;
+    const formattedTranscript = messages
+      .map(m => `### [${new Date(m.timestamp).toLocaleTimeString()}] ${m.sender === 'user' ? (commConfig.userPreferredName || 'Kailin') : 'ANGEL AI'}\n${m.text}`)
+      .join('\n\n---\n\n');
+
+    const sessionTitle = `Dialogue Session: ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    addGoldMemory({
+      title: sessionTitle,
+      category: 'CONVERSATION_MEMORY',
+      content: formattedTranscript,
+      sourceType: 'TEXT_NOTE',
+      isActive: true,
+      tags: ['Conversation', 'Dialogue History', 'Kailin & ANGEL', activeInstrument.symbol]
+    });
+
+    setQuickUploadStatus(`✓ Dialogue archived as new memory: "${sessionTitle}"`);
+    setTimeout(() => setQuickUploadStatus(null), 3500);
   };
 
   const copyToClipboard = (id: string, text: string) => {
@@ -322,6 +460,19 @@ Greetings, **${commConfig.userPreferredName}**. I have refreshed our chat feed. 
 
           {/* Header Actions */}
           <div className="flex items-center gap-2">
+            {/* Instant AI Package Download Button */}
+            <button
+              type="button"
+              onClick={handleDownloadPackage}
+              disabled={isDownloadingPackage}
+              className="px-3.5 py-1.5 rounded-lg text-xs font-bold bg-gradient-to-r from-amber-500/25 via-amber-400/25 to-yellow-500/25 hover:from-amber-500/40 hover:to-yellow-500/40 text-amber-200 hover:text-white border border-amber-400/60 hover:border-amber-300 transition-all flex items-center gap-1.5 cursor-pointer shadow-md shadow-amber-500/15 active:scale-95 disabled:opacity-50"
+              title="Download your own AI ANGEL consolidated master file ANGEL X in a complete zip package"
+            >
+              <Download className={`w-3.5 h-3.5 text-amber-400 ${isDownloadingPackage ? 'animate-bounce' : ''}`} />
+              <span className="hidden sm:inline">{isDownloadingPackage ? 'Exporting Package...' : 'Download ANGEL X (.ZIP)'}</span>
+              <span className="sm:hidden">{isDownloadingPackage ? '...' : 'ANGEL X .ZIP'}</span>
+            </button>
+
             {/* Close */}
             <button
               type="button"
@@ -359,23 +510,53 @@ Greetings, **${commConfig.userPreferredName}**. I have refreshed our chat feed. 
               }`}
             >
               <Database className="w-3.5 h-3.5 text-amber-400" />
-              <span>Memory Data & Uploads</span>
-              <span className="text-[10px] font-mono px-2 py-0.2 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                {activeMemoryCount} Active
+              <span>ANGEL X Storage</span>
+              <span className="text-[10px] font-mono px-2 py-0.2 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                1 File: ANGEL X
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab('tuning')}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer ${
+                activeTab === 'tuning'
+                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-[#131C2E]'
+              }`}
+            >
+              <Brain className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="hidden sm:inline">Gemini Companion</span>
+              <span className="sm:hidden">Corpus</span>
+              <span className="text-[10px] font-mono px-2 py-0.2 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+                5 Vols
               </span>
             </button>
           </div>
 
           <div className="flex items-center gap-2">
             {activeTab === 'chat' && (
-              <button
-                type="button"
-                onClick={clearChat}
-                title="Clear Conversation"
-                className="text-slate-400 hover:text-slate-200 text-xs px-2.5 py-1 rounded-md hover:bg-[#162035] transition-colors cursor-pointer font-mono"
-              >
-                Clear Chat
-              </button>
+              <>
+                {messages.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={handleSaveChatToMemory}
+                    title="Archive this dialogue session into Gold Neural Memory files"
+                    className="text-xs font-medium px-2.5 py-1 rounded-md text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 transition-colors cursor-pointer flex items-center gap-1 font-mono"
+                  >
+                    <Database className="w-3 h-3 text-emerald-400" />
+                    <span className="hidden sm:inline">Save Chat to Memory</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={clearChat}
+                  title="Clear Conversation"
+                  className="text-slate-400 hover:text-slate-200 text-xs px-2.5 py-1 rounded-md hover:bg-[#162035] transition-colors cursor-pointer font-mono"
+                >
+                  Clear Chat
+                </button>
+              </>
             )}
           </div>
         </div>
@@ -488,7 +669,7 @@ Greetings, **${commConfig.userPreferredName}**. I have refreshed our chat feed. 
                 onChange={handleChatFileUpload}
                 className="hidden"
                 multiple
-                accept=".txt,.csv,.json,.md,.log,.pdf,.doc,.docx,.png,.jpg,.jpeg"
+                accept="*/*,.zip,.tar,.gz,.json,.csv,.txt,.md,.pdf,.png,.jpg,.jpeg,*"
               />
 
               <form
@@ -498,15 +679,27 @@ Greetings, **${commConfig.userPreferredName}**. I have refreshed our chat feed. 
                 }}
                 className="flex items-center gap-2"
               >
-                {/* Direct Upload File to Memory button */}
+                {/* Direct Upload File / .ZIP to Memory button */}
                 <button
                   type="button"
                   onClick={() => chatFileInputRef.current?.click()}
-                  title="Upload Gold File directly to AI Memory (.txt, .md, .csv, .pdf, images)"
+                  title="Upload any file or .ZIP archive directly into AI Neural Memory"
                   className="p-3 rounded-xl bg-[#121A2C] hover:bg-[#1A253D] text-amber-400 hover:text-amber-300 border border-[#23314E] hover:border-amber-500/40 transition-colors cursor-pointer shrink-0 flex items-center gap-1.5"
                 >
                   <Paperclip className="w-4 h-4" />
-                  <span className="text-xs font-mono hidden md:inline">Upload File</span>
+                  <span className="text-xs font-mono hidden md:inline">Upload File / .ZIP</span>
+                </button>
+
+                {/* Direct Download My AI ANGEL & All Files */}
+                <button
+                  type="button"
+                  onClick={handleDownloadPackage}
+                  disabled={isDownloadingPackage}
+                  title="Download your own AI ANGEL, all 22+ datasets, memory files, transcripts & directives (.ZIP)"
+                  className="p-3 rounded-xl bg-[#121A2C] hover:bg-[#1A253D] text-cyan-400 hover:text-cyan-300 border border-[#23314E] hover:border-cyan-500/40 transition-colors cursor-pointer shrink-0 flex items-center gap-1.5 active:scale-95 disabled:opacity-50"
+                >
+                  <Download className={`w-4 h-4 ${isDownloadingPackage ? 'animate-bounce' : ''}`} />
+                  <span className="text-xs font-mono hidden lg:inline">{isDownloadingPackage ? 'Exporting...' : 'Download AI ANGEL'}</span>
                 </button>
 
                 <div className="relative flex-1">
@@ -514,7 +707,7 @@ Greetings, **${commConfig.userPreferredName}**. I have refreshed our chat feed. 
                     type="text"
                     value={inputMessage}
                     onChange={(e) => setInputMessage(e.target.value)}
-                    placeholder="Ask ANGEL anything, audit setups, or discuss your Gold memories..."
+                    placeholder="Talk with ANGEL like a person, ask how your day went, or audit setups..."
                     className="w-full bg-[#121A2C] border border-[#23314E] rounded-xl px-4 py-3 text-sm text-white placeholder-slate-400 focus:outline-none focus:border-amber-400 transition-colors shadow-inner"
                   />
                 </div>
@@ -543,6 +736,24 @@ Greetings, **${commConfig.userPreferredName}**. I have refreshed our chat feed. 
         {/* Tab 2: Gold Memory Data & Uploaded Documents Manager */}
         {activeTab === 'memory' && (
           <AngelMemoryDataManager onAskAboutMemory={handleAskAboutMemory} />
+        )}
+
+        {/* Tab 3: Gemini Companion & 5.0 GB Master Communication Corpus Tuning */}
+        {activeTab === 'tuning' && (
+          <AngelCommunicationTuning
+            config={commConfig}
+            onChangeConfig={(newCfg) => {
+              setCommConfig(newCfg);
+              try {
+                localStorage.setItem('angel_companion_comm_config_v2', JSON.stringify(newCfg));
+              } catch {}
+            }}
+            onSelectPrompt={(promptText) => {
+              setActiveTab('chat');
+              handleSendMessage(promptText);
+            }}
+            activeProjectName={activeProject.name}
+          />
         )}
       </div>
     </div>

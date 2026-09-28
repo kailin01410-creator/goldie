@@ -10,7 +10,9 @@ import {
   Clock,
   Wifi,
   WifiOff,
-  Sparkles
+  Sparkles,
+  Bell,
+  Download
 } from 'lucide-react';
 import { useTrading } from '../context/TradingContext';
 
@@ -27,7 +29,11 @@ export const Header: React.FC = () => {
     lastGoldSyncTime,
     setIsSettingsModalOpen,
     setIsAngelModalOpen,
-    activeProject
+    activeProject,
+    priceAlerts,
+    setIsPriceAlertModalOpen,
+    downloadAngelPackage,
+    isDownloadingAngel
   } = useTrading();
 
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
@@ -43,7 +49,7 @@ export const Header: React.FC = () => {
       }
     };
     updateElapsed();
-    const interval = setInterval(updateElapsed, 1000);
+    const interval = setInterval(updateElapsed, 2000);
     return () => clearInterval(interval);
   }, [lastGoldSyncTime]);
 
@@ -258,6 +264,38 @@ export const Header: React.FC = () => {
             <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-cyan-400' : ''}`} />
           </button>
 
+          {/* Price Alerts Button */}
+          {(() => {
+            const activeCount = priceAlerts.filter(a => a.status === 'ACTIVE').length;
+            return (
+              <button
+                id="header-price-alerts-btn"
+                type="button"
+                onClick={() => setIsPriceAlertModalOpen(true)}
+                className={`relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border font-mono text-xs transition-all cursor-pointer ${
+                  activeCount > 0
+                    ? 'bg-amber-500/10 hover:bg-amber-500/20 border-amber-500/40 hover:border-amber-400 text-amber-300'
+                    : 'bg-[#0E131F] hover:bg-[#141B2D] border-[#1E2638] hover:border-slate-500 text-slate-300 hover:text-white'
+                }`}
+                title={`Price Alerts (${activeCount} active thresholds)`}
+                aria-label="Price Alerts"
+              >
+                <div className="relative">
+                  <Bell className="w-3.5 h-3.5" />
+                  {activeCount > 0 && (
+                    <span className="absolute -top-1 -right-1 w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
+                  )}
+                </div>
+                <span className="hidden sm:inline font-bold">Alerts</span>
+                {activeCount > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-full bg-amber-500/25 text-amber-200 text-[10px] font-bold">
+                    {activeCount}
+                  </span>
+                )}
+              </button>
+            );
+          })()}
+
           {/* ANGEL AI Companion Button */}
           <button
             id="header-angel-btn"
@@ -272,6 +310,21 @@ export const Header: React.FC = () => {
             <span className="hidden md:inline text-[10px] text-amber-300 font-mono">
               ({activeProject.category})
             </span>
+          </button>
+
+          {/* Download AI ANGEL & All Files Button */}
+          <button
+            id="header-download-angel-btn"
+            type="button"
+            onClick={downloadAngelPackage}
+            disabled={isDownloadingAngel}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-gradient-to-r from-amber-600/25 via-amber-500/20 to-yellow-500/20 hover:from-amber-600/40 hover:to-yellow-500/35 border border-amber-500/50 hover:border-amber-400 text-amber-200 font-mono text-xs transition-all cursor-pointer shadow-sm shadow-amber-500/10 active:scale-95 disabled:opacity-50"
+            title="Download consolidated master intelligence file ANGEL X (.ZIP)"
+            aria-label="Download ANGEL X"
+          >
+            <Download className={`w-3.5 h-3.5 text-amber-400 ${isDownloadingAngel ? 'animate-bounce' : ''}`} />
+            <span className="font-bold hidden xl:inline text-white">{isDownloadingAngel ? 'Downloading...' : 'Download ANGEL X'}</span>
+            <span className="font-bold xl:hidden">{isDownloadingAngel ? '...' : 'ANGEL X'}</span>
           </button>
 
           {/* Settings Button */}

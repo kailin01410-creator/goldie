@@ -600,6 +600,7 @@ export interface GoldMemoryItem {
 }
 
 export type AngelCommunicationStyle = 
+  | 'GEMINI_COMPANION'
   | 'COURTEOUS_DEVOTED' 
   | 'WARM_EMPATHIC' 
   | 'DIGNIFIED_MENTOR' 
@@ -616,6 +617,8 @@ export interface AngelCommunicationConfig {
   enablePsychologyCheckIns: boolean;
   proactiveFollowUps: boolean;
   gratitudeAndHumility: boolean;
+  communicationCorpusActive?: boolean;
+  geminiHumorAndWarmth?: boolean;
 }
 
 export interface AngelProject {
@@ -662,4 +665,31 @@ export interface OptionsGexPanelStatus {
   providerNotice: string;
   requiredDataFeeds: string[];
   specsExplanation: string;
+}
+
+export type PriceAlertDirection = 'ABOVE' | 'BELOW';
+
+export interface PriceAlert {
+  id: string;
+  symbol: string; // e.g. 'XAU/USD'
+  targetPrice: number;
+  direction: PriceAlertDirection; // 'ABOVE' = triggers when price >= target; 'BELOW' = triggers when price <= target
+  status: 'ACTIVE' | 'TRIGGERED' | 'DISABLED';
+  createdAt: number;
+  triggeredAt?: number;
+  triggeredPrice?: number;
+  note?: string;
+  soundEnabled: boolean;
+  initialPrice: number;
+}
+
+export interface PriceAlertNotification {
+  id: string;
+  alertId: string;
+  symbol: string;
+  targetPrice: number;
+  crossedPrice: number;
+  direction: PriceAlertDirection;
+  timestamp: number;
+  note?: string;
 }

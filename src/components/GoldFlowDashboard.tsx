@@ -7,7 +7,8 @@ import {
   Flame, 
   Maximize2, 
   LayoutGrid,
-  Sparkles
+  Sparkles,
+  Download
 } from 'lucide-react';
 import { useTrading } from '../context/TradingContext';
 import { LiveChartPanel } from './panels/LiveChartPanel';
@@ -18,7 +19,7 @@ import { OptionsGexPanel } from './panels/OptionsGexPanel';
 
 export const GoldFlowDashboard: React.FC = () => {
   const [activeLayoutView, setActiveLayoutView] = useState<'ALL' | 'CHART_PRIMARY' | 'ANALYTICS'>('ALL');
-  const { setIsAngelModalOpen, activeProject } = useTrading();
+  const { setIsAngelModalOpen, activeProject, downloadAngelPackage, isDownloadingAngel } = useTrading();
 
   return (
     <div className="space-y-4 max-w-7xl mx-auto pb-10">
@@ -67,6 +68,20 @@ export const GoldFlowDashboard: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Download My AI ANGEL & All Files Button */}
+          <button
+            id="dashboard-download-angel-btn"
+            type="button"
+            onClick={downloadAngelPackage}
+            disabled={isDownloadingAngel}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-amber-600/25 via-amber-500/20 to-yellow-500/20 hover:from-amber-600/40 hover:to-yellow-500/35 border border-amber-500/50 hover:border-amber-400 text-amber-200 font-mono text-xs transition-all cursor-pointer shadow-sm shadow-amber-500/10 active:scale-95 disabled:opacity-50"
+            title="Download consolidated master intelligence file ANGEL X (.ZIP)"
+          >
+            <Download className={`w-3.5 h-3.5 text-amber-400 ${isDownloadingAngel ? 'animate-bounce' : ''}`} />
+            <span className="font-bold text-white hidden sm:inline">{isDownloadingAngel ? 'Packaging...' : 'Download ANGEL X'}</span>
+            <span className="font-bold text-white sm:hidden">ANGEL X</span>
+          </button>
+
           <button
             type="button"
             onClick={() => setIsAngelModalOpen(true)}

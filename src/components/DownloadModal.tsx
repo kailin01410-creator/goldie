@@ -14,6 +14,7 @@ import {
   ShieldCheck,
   CheckCircle2
 } from 'lucide-react';
+import { useTrading } from '../context/TradingContext';
 
 interface DownloadModalProps {
   isOpen: boolean;
@@ -21,6 +22,7 @@ interface DownloadModalProps {
 }
 
 export const DownloadModal: React.FC<DownloadModalProps> = ({ isOpen, onClose }) => {
+  const { downloadAngelPackage, isDownloadingAngel } = useTrading();
   const [isDownloading, setIsDownloading] = useState<boolean>(false);
   const [copiedStep, setCopiedStep] = useState<string | null>(null);
 
@@ -98,8 +100,39 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({ isOpen, onClose })
         {/* Content Body */}
         <div className="p-5 space-y-5 overflow-y-auto flex-1">
           
-          {/* Main 1-Click Download Hero Action */}
-          <div className="bg-gradient-to-r from-amber-500/10 via-amber-600/10 to-transparent border border-amber-500/30 rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4">
+          {/* Download AI ANGEL & All Files Card */}
+          <div className="bg-gradient-to-r from-amber-500/20 via-yellow-500/15 to-transparent border-2 border-amber-500/50 rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xl shadow-amber-500/10">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-amber-400 animate-pulse" />
+                <span className="text-xs font-mono font-bold text-amber-300 uppercase">
+                  AI ANGEL Master Intelligence Package
+                </span>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+                  Real Byte Storage • Full Code, JSON & Blank Data
+                </span>
+              </div>
+              <h3 className="text-sm font-bold text-white">
+                Download Master File ANGEL X (.ZIP)
+              </h3>
+              <p className="text-xs text-slate-300">
+                Consolidated single master file ANGEL X merging all 22 datasets, offline CLI runners (Node.js & Python), 90 Directives Constitution, and dialogue logs.
+              </p>
+            </div>
+
+            <button
+              id="download-angel-modal-btn"
+              onClick={downloadAngelPackage}
+              disabled={isDownloadingAngel}
+              className="w-full sm:w-auto px-5 py-3 rounded-xl bg-gradient-to-r from-amber-500 via-amber-400 to-yellow-500 hover:from-amber-400 hover:to-yellow-400 text-slate-950 font-extrabold text-xs uppercase font-mono flex items-center justify-center gap-2 shadow-lg shadow-amber-500/25 active:scale-95 disabled:opacity-50 cursor-pointer shrink-0"
+            >
+              <Download className={`w-4 h-4 ${isDownloadingAngel ? 'animate-bounce' : ''}`} />
+              <span>{isDownloadingAngel ? 'Packaging ANGEL X...' : 'Download ANGEL X (.ZIP)'}</span>
+            </button>
+          </div>
+
+          {/* Main 1-Click Codebase Download Action */}
+          <div className="bg-gradient-to-r from-cyan-500/10 via-blue-600/10 to-transparent border border-cyan-500/30 rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4">
             <div>
               <span className="text-xs font-mono font-bold text-amber-300 uppercase block">
                 Direct 1-Click Download

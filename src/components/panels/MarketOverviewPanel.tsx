@@ -8,7 +8,8 @@ import {
   Activity, 
   HelpCircle,
   BarChart2,
-  Compass
+  Compass,
+  Bell
 } from 'lucide-react';
 import { useTrading } from '../../context/TradingContext';
 import { calculateATR, assessMarketDirection } from '../../utils/technicalAnalysis';
@@ -20,7 +21,8 @@ export const MarketOverviewPanel: React.FC = () => {
     goldDataSource, 
     lastGoldSyncTime,
     isMarketClosed,
-    marketClosureReason
+    marketClosureReason,
+    setIsPriceAlertModalOpen
   } = useTrading();
 
   // Price calculations
@@ -28,15 +30,18 @@ export const MarketOverviewPanel: React.FC = () => {
   const changeDollars = activeInstrument.currentPrice - (activeInstrument.open24h || activeInstrument.currentPrice);
   const spreadRange = activeInstrument.high24h - activeInstrument.low24h;
 
+  const lastBarTime = candles.length > 0 ? candles[candles.length - 1].time : 0;
+  const priceBracket = Math.round((activeInstrument.currentPrice || 0) * 2);
+
   // Volatility (ATR 14)
   const atrResult = useMemo(() => {
     return calculateATR(candles, 14);
-  }, [candles]);
+  }, [candles.length, lastBarTime, priceBracket]);
 
   // Market Direction Assessment
   const directionAssessment = useMemo(() => {
     return assessMarketDirection(candles);
-  }, [candles]);
+  }, [candles.length, lastBarTime, priceBracket]);
 
   const formattedSync = lastGoldSyncTime > 0
     ? new Date(lastGoldSyncTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
@@ -73,7 +78,18 @@ export const MarketOverviewPanel: React.FC = () => {
         <div className="p-3.5 rounded-xl bg-[#090E17] border border-[#1A2234] flex flex-col justify-between">
           <div className="flex items-center justify-between text-slate-400 text-xs font-mono mb-1">
             <span>CURRENT SPOT</span>
-            <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setIsPriceAlertModalOpen(true)}
+                className="flex items-center gap-1 text-[10px] text-amber-400 hover:text-amber-300 hover:underline cursor-pointer font-bold"
+                title="Set Price Alert"
+              >
+                <Bell className="w-3 h-3" />
+                <span>Alert</span>
+              </button>
+              <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+            </div>
           </div>
           <div className="text-xl font-extrabold font-mono text-white tracking-tight">
             ${activeInstrument.currentPrice.toFixed(activeInstrument.decimals)}

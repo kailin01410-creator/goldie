@@ -14,7 +14,14 @@ import {
   Sliders, 
   BookOpen,
   MessageCircle,
-  ThumbsUp
+  ThumbsUp,
+  Database,
+  Brain,
+  Layers,
+  ChevronDown,
+  ChevronRight,
+  Zap,
+  Play
 } from 'lucide-react';
 import { 
   AngelCommunicationConfig, 
@@ -29,6 +36,13 @@ import {
   ANGEL_CORE_ETIQUETTE_PRINCIPLES,
   CONVERSATIONAL_STARTERS
 } from '../../data/angelProjects';
+import {
+  COMMUNICATION_CORPUS_VOLUMES,
+  TOTAL_COMMUNICATION_CORPUS_GB,
+  TOTAL_INDEXED_TOPICS,
+  GEMINI_COMMUNICATION_MODES,
+  CONVERSATIONAL_STARTER_PROMPTS
+} from '../../data/communicationDataset';
 
 interface AngelCommunicationTuningProps {
   config: AngelCommunicationConfig;
@@ -44,6 +58,7 @@ export const AngelCommunicationTuning: React.FC<AngelCommunicationTuningProps> =
   activeProjectName
 }) => {
   const [copiedNotification, setCopiedNotification] = useState(false);
+  const [expandedVolumeId, setExpandedVolumeId] = useState<string>('vol-1-empathy');
 
   const handleUpdate = (partial: Partial<AngelCommunicationConfig>) => {
     onChangeConfig({
@@ -54,6 +69,8 @@ export const AngelCommunicationTuning: React.FC<AngelCommunicationTuningProps> =
 
   const getStyleIcon = (styleId: AngelCommunicationStyle) => {
     switch (styleId) {
+      case 'GEMINI_COMPANION':
+        return <Sparkles className="w-4 h-4 text-cyan-400" />;
       case 'COURTEOUS_DEVOTED':
         return <Sparkles className="w-4 h-4 text-amber-400" />;
       case 'WARM_EMPATHIC':
@@ -67,40 +84,165 @@ export const AngelCommunicationTuning: React.FC<AngelCommunicationTuningProps> =
 
   return (
     <div className="flex-1 overflow-y-auto p-4 space-y-6 bg-[#080B12] text-slate-200 no-scrollbar">
-      {/* Overview Banner */}
-      <div className="bg-gradient-to-r from-amber-500/15 via-purple-500/10 to-cyan-500/10 border border-amber-500/30 rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-lg">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center shrink-0 shadow-inner">
-            <Sparkles className="w-5 h-5 text-amber-300 animate-pulse" />
+      
+      {/* 5GB Communication Corpus Master Banner */}
+      <div className="bg-gradient-to-r from-amber-500/15 via-cyan-500/15 to-purple-500/15 border border-amber-500/40 rounded-2xl p-4 sm:p-5 shadow-2xl relative overflow-hidden">
+        <div className="absolute -top-12 -right-12 w-48 h-48 rounded-full bg-cyan-500/10 blur-3xl pointer-events-none" />
+
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 relative z-10">
+          <div className="flex items-start gap-3.5">
+            <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-amber-500/25 to-cyan-500/30 border border-amber-400/50 flex items-center justify-center shrink-0 shadow-lg shadow-amber-500/10">
+              <Brain className="w-6 h-6 text-amber-300 animate-pulse" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-base font-bold text-white tracking-wide flex items-center gap-2">
+                  Gemini Human Companion & Communication Corpus
+                </h3>
+                <span className="text-[10px] font-mono px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/35 font-bold flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                  5 Knowledge Volumes Synced
+                </span>
+              </div>
+              <p className="text-xs text-slate-300 mt-1 leading-relaxed max-w-2xl">
+                Trained in human emotional intelligence, natural Gemini dialogue cadence, active listening, Socratic inquiry, and empathetic trading psychology.
+              </p>
+            </div>
           </div>
-          <div>
-            <h3 className="text-sm font-bold text-white flex items-center gap-2">
-              ANGEL Etiquette & Communication Matrix
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                Trained in Courtesy
-              </span>
-            </h3>
-            <p className="text-xs text-slate-300 mt-0.5">
-              Empowering ANGEL with sincere conversational manners, empathetic active listening, and profound respect for your capital.
-            </p>
+
+          <div className="flex items-center gap-2 self-start md:self-auto shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                onSelectPrompt(`Hello ANGEL! How are you doing today? I would love to just talk and check in with you like a true friend and companion.`);
+                setCopiedNotification(true);
+                setTimeout(() => setCopiedNotification(false), 2500);
+              }}
+              className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-black text-xs font-bold font-mono flex items-center gap-1.5 cursor-pointer shadow-lg shadow-amber-500/20 transition-all shrink-0"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>{copiedNotification ? 'Sent to Chat!' : 'Test Gemini Companion'}</span>
+            </button>
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={() => {
-            onSelectPrompt(`ANGEL, I appreciate your courtesy and proper respect. Please continue communicating with this warmth, attentiveness, and devotion to our ${activeProjectName} project.`);
-            setCopiedNotification(true);
-            setTimeout(() => setCopiedNotification(false), 2500);
-          }}
-          className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-black text-xs font-bold font-mono flex items-center gap-1.5 cursor-pointer shadow-md transition-all shrink-0"
-        >
-          <ThumbsUp className="w-3.5 h-3.5" />
-          <span>{copiedNotification ? 'Praise Sent!' : 'Praise Courtesy'}</span>
-        </button>
+        {/* Live Corpus Key Metrics Strip */}
+        <div className="mt-4 pt-3.5 border-t border-[#23314E]/60 grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs font-mono">
+          <div className="bg-[#0A0F1D]/80 border border-[#1C2740] rounded-lg px-3 py-2">
+            <span className="text-slate-400 text-[10px] block">CORPUS CAPACITY</span>
+            <span className="text-amber-300 font-bold text-sm">{TOTAL_COMMUNICATION_CORPUS_GB}.0 GB Data Set</span>
+          </div>
+          <div className="bg-[#0A0F1D]/80 border border-[#1C2740] rounded-lg px-3 py-2">
+            <span className="text-slate-400 text-[10px] block">INDEXED TOPICS</span>
+            <span className="text-cyan-300 font-bold text-sm">{TOTAL_INDEXED_TOPICS.toLocaleString()} Heuristics</span>
+          </div>
+          <div className="bg-[#0A0F1D]/80 border border-[#1C2740] rounded-lg px-3 py-2">
+            <span className="text-slate-400 text-[10px] block">EMPATHY SCORE</span>
+            <span className="text-emerald-300 font-bold text-sm">99.4% EQ Rating</span>
+          </div>
+          <div className="bg-[#0A0F1D]/80 border border-[#1C2740] rounded-lg px-3 py-2">
+            <span className="text-slate-400 text-[10px] block">COMMUNICATION ENGINE</span>
+            <span className="text-purple-300 font-bold text-sm">Gemini 3.8 Flash</span>
+          </div>
+        </div>
       </div>
 
-      {/* Grid: Preferred Name & Respect Level */}
+      {/* 5 Master Communication Volumes Explorer */}
+      <div className="bg-[#0D1322] border border-[#1E2B47] rounded-xl p-4 sm:p-5 space-y-4 shadow-xl">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Layers className="w-4 h-4 text-cyan-400" />
+            <h4 className="text-sm font-bold text-white font-mono uppercase tracking-wider">
+              Communication Corpus — 5 Knowledge Volumes
+            </h4>
+          </div>
+          <span className="text-xs text-slate-400 font-mono hidden sm:inline">
+            Click any volume to inspect learned human dialogue directives
+          </span>
+        </div>
+
+        <div className="space-y-2.5">
+          {COMMUNICATION_CORPUS_VOLUMES.map((vol) => {
+            const isExpanded = expandedVolumeId === vol.id;
+            return (
+              <div 
+                key={vol.id}
+                className={`rounded-xl border transition-all overflow-hidden ${
+                  isExpanded 
+                    ? 'bg-[#10172B] border-cyan-500/40 shadow-lg shadow-cyan-500/5' 
+                    : 'bg-[#0B101C] border-[#18233B] hover:border-slate-600'
+                }`}
+              >
+                {/* Volume Header Toggle */}
+                <button
+                  type="button"
+                  onClick={() => setExpandedVolumeId(isExpanded ? '' : vol.id)}
+                  className="w-full p-3.5 flex items-center justify-between text-left cursor-pointer transition-colors"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="w-7 h-7 rounded-lg bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 flex items-center justify-center text-xs font-mono font-bold shrink-0">
+                      V{vol.volumeNumber}
+                    </span>
+                    <div>
+                      <div className="text-xs sm:text-sm font-bold text-white flex items-center gap-2 flex-wrap">
+                        <span>{vol.title}</span>
+                        <span className="text-[10px] font-mono px-2 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                          {vol.sizeGb} GB
+                        </span>
+                        <span className="text-[10px] text-slate-400 font-mono">
+                          {vol.topicsCount} Topics
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-0.5">{vol.subtitle}</p>
+                    </div>
+                  </div>
+
+                  <div className="text-slate-400 shrink-0 ml-2">
+                    {isExpanded ? <ChevronDown className="w-4 h-4 text-cyan-400" /> : <ChevronRight className="w-4 h-4" />}
+                  </div>
+                </button>
+
+                {/* Expanded Volume Details */}
+                {isExpanded && (
+                  <div className="px-4 pb-4 pt-1 border-t border-[#1C2842] space-y-3 font-sans animate-fadeIn">
+                    <p className="text-xs text-slate-300 italic">
+                      "{vol.description}"
+                    </p>
+
+                    <div className="space-y-2.5">
+                      {vol.corePrinciples.map((principle, pIdx) => (
+                        <div key={pIdx} className="bg-[#0C1220] border border-[#19243C] rounded-lg p-3 space-y-2">
+                          <div className="flex items-center gap-1.5 text-xs font-bold text-amber-300">
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                            <span>{principle.name}</span>
+                          </div>
+                          <p className="text-xs text-slate-300 leading-relaxed pl-3">
+                            {principle.directive}
+                          </p>
+
+                          {/* Example Human Exchange */}
+                          <div className="bg-[#080D18] border border-[#151E33] rounded-md p-2.5 text-[11px] font-mono space-y-1.5">
+                            <div className="text-slate-400 flex items-start gap-1.5">
+                              <span className="text-cyan-400 font-bold shrink-0">Trader:</span>
+                              <span className="text-slate-200">"{principle.exampleExchange.user}"</span>
+                            </div>
+                            <div className="text-slate-300 flex items-start gap-1.5 pl-2 border-l border-amber-500/30">
+                              <span className="text-amber-400 font-bold shrink-0">ANGEL:</span>
+                              <span className="text-amber-100 font-sans">{principle.exampleExchange.angel}</span>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Grid: Preferred Name & Communication Style */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {/* Preferred Name Card */}
         <div className="bg-[#0D1322] border border-[#1A253D] rounded-xl p-4 space-y-3">
@@ -116,52 +258,39 @@ export const AngelCommunicationTuning: React.FC<AngelCommunicationTuningProps> =
               type="text"
               value={config.userPreferredName}
               onChange={(e) => handleUpdate({ userPreferredName: e.target.value })}
-              placeholder="e.g. Trader, Alex, Captain, Friend"
+              placeholder="e.g. Kailin, Trader, Captain, Friend"
               className="w-full bg-[#12192A] border border-[#23314E] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-amber-400 font-sans"
             />
           </div>
-          <div className="flex items-center gap-2 text-[11px] text-slate-400">
-            <span>Quick presets:</span>
-            {['Trader', 'Captain', 'Partner', 'Friend'].map(preset => (
-              <button
-                key={preset}
-                type="button"
-                onClick={() => handleUpdate({ userPreferredName: preset })}
-                className={`px-2 py-0.5 rounded text-[11px] transition-colors ${
-                  config.userPreferredName === preset
-                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                    : 'bg-[#151E33] text-slate-400 hover:text-white'
-                }`}
-              >
-                {preset}
-              </button>
-            ))}
+          <div className="text-[11px] text-slate-400 flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+            <span>Currently addressing you as: <strong className="text-amber-300">{config.userPreferredName || 'Trader'}</strong></span>
           </div>
         </div>
 
         {/* Respect & Courtesy Level */}
         <div className="bg-[#0D1322] border border-[#1A253D] rounded-xl p-4 space-y-3">
-          <div className="flex items-center gap-2 text-xs font-bold text-cyan-300 uppercase tracking-wider">
-            <Shield className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Respect & Reverence Level</span>
+          <div className="flex items-center gap-2 text-xs font-bold text-purple-300 uppercase tracking-wider">
+            <Crown className="w-3.5 h-3.5 text-purple-400" />
+            <span>Respect & Courtesy Calibrator</span>
           </div>
           <div className="space-y-2">
             {ANGEL_RESPECT_LEVEL_OPTIONS.map((opt) => (
-              <label
+              <label 
                 key={opt.id}
-                onClick={() => handleUpdate({ respectLevel: opt.id })}
-                className={`flex items-start gap-2.5 p-2 rounded-lg cursor-pointer transition-all border ${
-                  config.respectLevel === opt.id
-                    ? 'bg-cyan-500/10 border-cyan-500/40 text-white'
-                    : 'bg-[#12192A]/50 border-transparent text-slate-400 hover:bg-[#152037]'
+                className={`flex items-start gap-2.5 p-2 rounded-lg border cursor-pointer transition-all ${
+                  config.respectLevel === opt.id 
+                    ? 'bg-[#181F33] border-purple-500/50 text-white' 
+                    : 'bg-[#12192A] border-transparent text-slate-300 hover:bg-[#151D30]'
                 }`}
               >
                 <input
                   type="radio"
                   name="respectLevel"
+                  value={opt.id}
                   checked={config.respectLevel === opt.id}
                   onChange={() => handleUpdate({ respectLevel: opt.id })}
-                  className="mt-1 text-cyan-400 focus:ring-0"
+                  className="mt-1 text-purple-400 focus:ring-0"
                 />
                 <div className="text-xs">
                   <div className="font-semibold text-slate-200">{opt.label}</div>
@@ -173,49 +302,43 @@ export const AngelCommunicationTuning: React.FC<AngelCommunicationTuningProps> =
         </div>
       </div>
 
-      {/* Communication Style Selector */}
+      {/* Style Matrix Options */}
       <div className="bg-[#0D1322] border border-[#1A253D] rounded-xl p-4 space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-xs font-bold text-amber-300 uppercase tracking-wider">
             <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-            <span>Companion Communication Style</span>
+            <span>Conversational Persona & Companion Tone</span>
           </div>
-          <span className="text-[11px] text-slate-400">
-            Current: <strong className="text-amber-300">{ANGEL_COMMUNICATION_STYLE_OPTIONS.find(s => s.id === config.style)?.label}</strong>
+          <span className="text-[11px] text-emerald-400 font-mono font-semibold">
+            Active: {ANGEL_COMMUNICATION_STYLE_OPTIONS.find(s => s.id === config.style)?.label || 'Gemini Companion'}
           </span>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-          {ANGEL_COMMUNICATION_STYLE_OPTIONS.map((styleOpt) => {
-            const isSelected = config.style === styleOpt.id;
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {ANGEL_COMMUNICATION_STYLE_OPTIONS.map((style) => {
+            const isSelected = config.style === style.id;
             return (
               <div
-                key={styleOpt.id}
-                onClick={() => handleUpdate({ style: styleOpt.id })}
-                className={`p-3 rounded-xl border transition-all cursor-pointer flex flex-col justify-between ${
-                  isSelected
-                    ? 'bg-amber-500/10 border-amber-500/50 shadow-md shadow-amber-500/5'
-                    : 'bg-[#111728] border-[#1C2740] hover:border-slate-600'
+                key={style.id}
+                onClick={() => handleUpdate({ style: style.id })}
+                className={`p-3.5 rounded-xl border transition-all cursor-pointer flex flex-col justify-between ${
+                  isSelected 
+                    ? 'bg-[#172238] border-amber-400/80 shadow-md shadow-amber-500/10' 
+                    : 'bg-[#10172A] border-[#1E2C4A] hover:border-slate-500 text-slate-300'
                 }`}
               >
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
-                    <div className="flex items-center gap-2">
-                      <div className="w-7 h-7 rounded-lg bg-[#162138] flex items-center justify-center">
-                        {getStyleIcon(styleOpt.id)}
-                      </div>
-                      <span className="text-xs font-bold text-white">
-                        {styleOpt.label}
-                      </span>
+                    <div className="flex items-center gap-2 font-bold text-xs text-white">
+                      {getStyleIcon(style.id)}
+                      <span>{style.label}</span>
                     </div>
                     {isSelected && (
-                      <span className="w-4 h-4 rounded-full bg-amber-400 text-black flex items-center justify-center text-[10px]">
-                        <Check className="w-3 h-3 stroke-[3]" />
-                      </span>
+                      <span className="w-2 h-2 rounded-full bg-amber-400" />
                     )}
                   </div>
-                  <p className="text-[11px] text-slate-400 leading-normal pl-9">
-                    {styleOpt.desc}
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    {style.desc}
                   </p>
                 </div>
               </div>
@@ -224,31 +347,31 @@ export const AngelCommunicationTuning: React.FC<AngelCommunicationTuningProps> =
         </div>
       </div>
 
-      {/* Conversational Depth & Behavioral Intelligence */}
+      {/* Depth & Emotional Intelligence Toggles */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {/* Conversational Depth */}
         <div className="bg-[#0D1322] border border-[#1A253D] rounded-xl p-4 space-y-3">
-          <div className="flex items-center gap-2 text-xs font-bold text-purple-300 uppercase tracking-wider">
-            <MessageCircle className="w-3.5 h-3.5 text-purple-400" />
-            <span>Conversational Depth & Proactivity</span>
+          <div className="flex items-center gap-2 text-xs font-bold text-cyan-300 uppercase tracking-wider">
+            <Sliders className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Conversational Depth & Pacing</span>
           </div>
           <div className="space-y-2">
             {ANGEL_CONVERSATIONAL_DEPTH_OPTIONS.map((opt) => (
-              <label
+              <label 
                 key={opt.id}
-                onClick={() => handleUpdate({ conversationalDepth: opt.id })}
-                className={`flex items-start gap-2.5 p-2 rounded-lg cursor-pointer transition-all border ${
-                  config.conversationalDepth === opt.id
-                    ? 'bg-purple-500/10 border-purple-500/40 text-white'
-                    : 'bg-[#12192A]/50 border-transparent text-slate-400 hover:bg-[#152037]'
+                className={`flex items-start gap-2.5 p-2 rounded-lg border cursor-pointer transition-all ${
+                  config.conversationalDepth === opt.id 
+                    ? 'bg-[#181F33] border-cyan-500/50 text-white' 
+                    : 'bg-[#12192A] border-transparent text-slate-300 hover:bg-[#151D30]'
                 }`}
               >
                 <input
                   type="radio"
                   name="conversationalDepth"
+                  value={opt.id}
                   checked={config.conversationalDepth === opt.id}
                   onChange={() => handleUpdate({ conversationalDepth: opt.id })}
-                  className="mt-1 text-purple-400 focus:ring-0"
+                  className="mt-1 text-cyan-400 focus:ring-0"
                 />
                 <div className="text-xs">
                   <div className="font-semibold text-slate-200">{opt.label}</div>
@@ -312,42 +435,18 @@ export const AngelCommunicationTuning: React.FC<AngelCommunicationTuningProps> =
         </div>
       </div>
 
-      {/* Core Learned Principles */}
-      <div className="bg-[#0B101C] border border-[#1A253E] rounded-xl p-4 space-y-3">
-        <div className="flex items-center gap-2 text-xs font-bold text-amber-300 uppercase tracking-wider">
-          <BookOpen className="w-3.5 h-3.5 text-amber-400" />
-          <span>Learned Etiquette & Respect Principles</span>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {ANGEL_CORE_ETIQUETTE_PRINCIPLES.map((principle, idx) => (
-            <div key={idx} className="bg-[#101728] border border-[#1D2944] rounded-lg p-3 space-y-1">
-              <div className="flex items-center gap-1.5 text-xs font-bold text-slate-200">
-                <span className="w-4 h-4 rounded-full bg-amber-500/20 text-amber-300 flex items-center justify-center text-[10px] font-mono">
-                  {idx + 1}
-                </span>
-                <span>{principle.title}</span>
-              </div>
-              <p className="text-[11px] text-slate-400 leading-relaxed pl-5">
-                {principle.desc}
-              </p>
-            </div>
-          ))}
-        </div>
-      </div>
-
       {/* Practice Dialogue Starters */}
       <div className="bg-[#0B101C] border border-[#1A253E] rounded-xl p-4 space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-xs font-bold text-cyan-300 uppercase tracking-wider">
             <MessageSquare className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Practice Dialogue with ANGEL</span>
+            <span>Human-to-Human Companion Dialogue Starters</span>
           </div>
-          <span className="text-[11px] text-slate-400">Click to start conversation</span>
+          <span className="text-[11px] text-slate-400">Click to start conversation in chat</span>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-          {CONVERSATIONAL_STARTERS.map((starter, idx) => (
+          {CONVERSATIONAL_STARTER_PROMPTS.map((starter, idx) => (
             <button
               key={idx}
               type="button"

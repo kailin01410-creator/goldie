@@ -103,6 +103,12 @@ export const ANGEL_PERSONA_OPTIONS = [
 
 export const ANGEL_COMMUNICATION_STYLE_OPTIONS: { id: AngelCommunicationStyle; label: string; desc: string; icon: string }[] = [
   {
+    id: 'GEMINI_COMPANION',
+    label: 'Gemini Natural Human Companion (5GB Corpus)',
+    desc: 'Speaks like your warmest, smartest companion—expressive, emotionally intelligent, attentive, inquiring, witty, and deeply human.',
+    icon: 'Sparkles',
+  },
+  {
     id: 'COURTEOUS_DEVOTED',
     label: 'Gracious & Respectful Companion',
     desc: 'Deeply courteous, humble, dedicated, speaks with utmost dignity and polite honorifics.',
@@ -165,13 +171,15 @@ export const ANGEL_CONVERSATIONAL_DEPTH_OPTIONS: { id: AngelConversationalDepth;
 ];
 
 export const DEFAULT_ANGEL_COMMUNICATION_CONFIG: AngelCommunicationConfig = {
-  style: 'COURTEOUS_DEVOTED',
+  style: 'GEMINI_COMPANION',
   respectLevel: 'HIGH_COURTESY',
   conversationalDepth: 'PROACTIVE_ENGAGING',
-  userPreferredName: 'Trader',
+  userPreferredName: 'Kailin',
   enablePsychologyCheckIns: true,
   proactiveFollowUps: true,
   gratitudeAndHumility: true,
+  communicationCorpusActive: true,
+  geminiHumorAndWarmth: true,
 };
 
 export const ANGEL_CORE_ETIQUETTE_PRINCIPLES = [
