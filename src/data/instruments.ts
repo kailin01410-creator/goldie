@@ -9,16 +9,16 @@ export const INITIAL_INSTRUMENTS: Instrument[] = [
     quoteCurrency: 'USD',
     decimals: 2,
     pipMultiplier: 10, // 0.10 is 1 pip in gold ($1 change = 10 pips)
-    currentPrice: 4379.00, // Live Global Spot Price
-    bid: 4378.95,
-    ask: 4379.05,
+    currentPrice: 4193.35, // Live Global Spot Price
+    bid: 4193.00,
+    ask: 4193.70,
     spreadPips: 0.0,
-    high24h: 4398.50,
-    low24h: 4364.10,
-    open24h: 4357.24,
+    high24h: 4227.14,
+    low24h: 4133.85,
+    open24h: 4177.69,
     volume24h: '$32.8B',
-    change24h: 0.50,
-    change24hPips: 21.8,
+    change24h: 0.37,
+    change24hPips: 156.6,
     tickDirection: 'UP',
   },
   {

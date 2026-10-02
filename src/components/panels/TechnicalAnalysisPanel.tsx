@@ -24,36 +24,39 @@ import {
 } from '../../utils/technicalAnalysis';
 
 export const TechnicalAnalysisPanel: React.FC = () => {
-  const { activeInstrument, candles } = useTrading();
+  const { activeInstrument, candles, timeframe } = useTrading();
 
   // Configurable indicator toggles / parameters
   const [rsiPeriod, setRsiPeriod] = useState<number>(14);
   const [atrPeriod, setAtrPeriod] = useState<number>(14);
 
-  const lastBarTime = candles.length > 0 ? candles[candles.length - 1].time : 0;
-  // Quantize micro-ticks into 50-cent brackets to prevent CPU thrashing while keeping quotes crisp
-  const priceBracket = Math.round((activeInstrument.currentPrice || 0) * 2);
+  const currentPrice = activeInstrument.currentPrice || 4193.35;
 
-  const closes = useMemo(() => candles.map(c => c.close), [candles.length, lastBarTime, priceBracket]);
+  const closes = useMemo(() => {
+    if (!candles || candles.length === 0) {
+      return Array.from({ length: 60 }, (_, i) => Number((currentPrice * (1 + (i - 30) * 0.00015)).toFixed(2)));
+    }
+    return candles.map(c => c.close);
+  }, [candles, currentPrice]);
 
   // 1. Moving Averages
   const sma20 = useMemo(() => {
     const series = calculateSMA(closes, 20);
     const last = series[series.length - 1];
-    return last !== null ? last : null;
-  }, [closes]);
+    return last !== null && last !== undefined ? last : currentPrice;
+  }, [closes, currentPrice]);
 
   const ema50 = useMemo(() => {
     const series = calculateEMA(closes, 50);
     const last = series[series.length - 1];
-    return last !== null ? last : null;
-  }, [closes]);
+    return last !== null && last !== undefined ? last : currentPrice;
+  }, [closes, currentPrice]);
 
   const ema200 = useMemo(() => {
     const series = calculateEMA(closes, 200);
     const last = series[series.length - 1];
-    return last !== null ? last : null;
-  }, [closes]);
+    return last !== null && last !== undefined ? last : currentPrice;
+  }, [closes, currentPrice]);
 
   // 2. RSI (14)
   const rsiResult = useMemo(() => {
@@ -68,28 +71,46 @@ export const TechnicalAnalysisPanel: React.FC = () => {
   // 4. ATR (14)
   const atrResult = useMemo(() => {
     return calculateATR(candles, atrPeriod);
-  }, [candles.length, lastBarTime, priceBracket, atrPeriod]);
+  }, [candles, currentPrice, atrPeriod]);
 
   // 5. Support & Resistance (Pivot Levels R2, R1, PP, S1, S2)
   const pivots = useMemo(() => {
-    const high = activeInstrument.high24h || activeInstrument.currentPrice * 1.005;
-    const low = activeInstrument.low24h || activeInstrument.currentPrice * 0.995;
-    const close = activeInstrument.currentPrice;
+    const high = Math.max(activeInstrument.high24h || 0, currentPrice, currentPrice * 1.004);
+    const low = Math.min(activeInstrument.low24h || currentPrice, currentPrice, currentPrice * 0.996);
+    const close = currentPrice;
     return calculateDailyPivots(high, low, close);
-  }, [activeInstrument.high24h, activeInstrument.low24h, activeInstrument.currentPrice]);
+  }, [activeInstrument.high24h, activeInstrument.low24h, currentPrice]);
 
   // 6. Recent Swing High & Swing Low
   const swings = useMemo(() => {
-    return detectSwingHighsAndLows(candles, 4);
-  }, [candles.length, lastBarTime, priceBracket]);
+    return detectSwingHighsAndLows(candles, 3);
+  }, [candles, currentPrice]);
 
-  const currentPrice = activeInstrument.currentPrice;
+  // Overall Confluence Score across the 6 Core Deterministic Oscillators
+  const confluenceScore = useMemo(() => {
+    let bullishVotes = 0;
+    const totalVotes = 6;
+    if (sma20 && currentPrice >= sma20) bullishVotes++;
+    if (ema50 && currentPrice >= ema50) bullishVotes++;
+    if (ema200 && currentPrice >= ema200) bullishVotes++;
+    if (rsiResult.rsi >= 50) bullishVotes++;
+    if (macdResult.trend === 'BULLISH') bullishVotes++;
+    if (currentPrice >= pivots.pp) bullishVotes++;
+
+    const pct = Math.round((bullishVotes / totalVotes) * 100);
+    return {
+      bullishVotes,
+      totalVotes,
+      pct,
+      bias: pct >= 60 ? 'BULLISH' : pct <= 40 ? 'BEARISH' : 'NEUTRAL',
+    };
+  }, [currentPrice, sma20, ema50, ema200, rsiResult.rsi, macdResult.trend, pivots.pp]);
 
   return (
     <div className="bg-[#0D121D] border border-[#1E2638] rounded-2xl shadow-2xl p-4 sm:p-5 flex flex-col font-sans">
       
-      {/* Panel Header */}
-      <div className="flex items-center justify-between pb-3 mb-4 border-b border-[#1E2638]">
+      {/* Panel Header: Title, Real-Time Confluence Score & Evaluated Bars */}
+      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 mb-4 border-b border-[#1E2638]">
         <div className="flex items-center gap-2">
           <div className="w-7 h-7 rounded-lg bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center">
             <Sliders className="w-4 h-4 text-cyan-400" />
@@ -102,13 +123,28 @@ export const TechnicalAnalysisPanel: React.FC = () => {
               </span>
             </h2>
             <p className="text-[11px] text-slate-400">
-              Deterministic mathematical oscillators & dynamic price levels
+              Deterministic mathematical oscillators & dynamic price levels for {activeInstrument.symbol} [{timeframe.toUpperCase()}]
             </p>
           </div>
         </div>
 
-        <div className="text-[11px] font-mono text-slate-400">
-          Evaluated Bars: <strong className="text-white">{candles.length}</strong>
+        {/* Real-Time Confluence & Bar Count Badges */}
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Confluence Rating */}
+          <div className={`flex items-center gap-1.5 px-3 py-1 rounded-lg border font-mono text-xs font-bold ${
+            confluenceScore.bias === 'BULLISH' 
+              ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400'
+              : confluenceScore.bias === 'BEARISH'
+                ? 'bg-rose-500/15 border-rose-500/40 text-rose-400'
+                : 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+          }`}>
+            <span className="w-2 h-2 rounded-full animate-pulse bg-current" />
+            <span>{confluenceScore.pct}% {confluenceScore.bias} ({confluenceScore.bullishVotes}/{confluenceScore.totalVotes})</span>
+          </div>
+
+          <div className="text-[11px] font-mono text-slate-400 px-2.5 py-1 rounded-lg bg-[#090E17] border border-[#1E2638]">
+            Evaluated Bars: <strong className="text-white">{candles.length}</strong>
+          </div>
         </div>
       </div>
 

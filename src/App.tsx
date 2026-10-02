@@ -1,7 +1,6 @@
 import React from 'react';
 import { TradingProvider, useTrading } from './context/TradingContext';
 import { Header } from './components/Header';
-import { Navigation } from './components/Navigation';
 import { GoldFlowDashboard } from './components/GoldFlowDashboard';
 import { OfflineLockOverlay } from './components/OfflineLockOverlay';
 import { AndroidInstallModal } from './components/AndroidInstallModal';
@@ -34,10 +33,7 @@ const MainLayout: React.FC = () => {
       {/* Premier GoldFlow Dashboard Top Bar */}
       <Header />
 
-      {/* Navigation Sub-Bar */}
-      <Navigation />
-
-      {/* Main Viewport: The 5 Premier Terminal Panels */}
+      {/* Main Viewport: The Premier Terminal Panels */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5">
         <GoldFlowDashboard />
       </main>

@@ -55,7 +55,8 @@ export const FluidLiveChart: React.FC = () => {
     timeframe, 
     setTimeframe,
     goldDataSource,
-    isMarketClosed 
+    isMarketClosed,
+    lastTickTime
   } = useTrading();
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -594,15 +595,37 @@ export const FluidLiveChart: React.FC = () => {
     vwapData
   ]);
 
-  // Request Animation Frame loop on state changes
+  // Handle container resizing and initial paint layout sizing via ResizeObserver
   useEffect(() => {
-    let animId: number;
-    const tick = () => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.contentRect.width > 0 && entry.contentRect.height > 0) {
+          const box = getPlotBox();
+          const vp = viewportRef.current;
+          if (vp.followLive && candles.length > 0) {
+            followLatest(candles.length, box, vp);
+          }
+          renderFrame();
+        }
+      }
+    });
+
+    observer.observe(el);
+    renderFrame();
+
+    return () => observer.disconnect();
+  }, [getPlotBox, candles.length, renderFrame]);
+
+  // Request Animation Frame loop on state changes and live market ticks
+  useEffect(() => {
+    let animId = requestAnimationFrame(() => {
       renderFrame();
-    };
-    animId = requestAnimationFrame(tick);
+    });
     return () => cancelAnimationFrame(animId);
-  }, [renderFrame]);
+  }, [renderFrame, lastTickTime, candles]);
 
   // Handle Wheel: Cursor-anchored horizontal zoom or independent price axis zoom
   const handleWheel = useCallback((e: React.WheelEvent) => {
