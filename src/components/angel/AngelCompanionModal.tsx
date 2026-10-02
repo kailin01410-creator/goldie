@@ -1,25 +1,59 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Sparkles, 
-  X, 
-  Send, 
-  CheckCircle2, 
-  RefreshCw, 
-  Copy, 
-  Check, 
-  Database, 
-  Paperclip, 
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import {
+  Sparkles,
+  X,
+  Send,
+  CheckCircle2,
+  RefreshCw,
+  Copy,
+  Check,
+  Database,
+  Paperclip,
   MessageSquare,
   Download,
   Brain,
-  Heart
+  Stethoscope,
+  ThumbsUp,
+  ThumbsDown,
+  FileText,
+  Calculator,
+  AlertTriangle,
+  WifiOff,
 } from 'lucide-react';
 import { useTrading } from '../../context/TradingContext';
-import { AngelChatMessage, GoldMemoryItem, AngelCommunicationConfig } from '../../types';
+import {
+  AngelChatMessage,
+  GoldMemoryItem,
+  AngelCommunicationConfig,
+  AngelCitation,
+  AngelCalculationTrace,
+} from '../../types';
 import { DEFAULT_ANGEL_COMMUNICATION_CONFIG } from '../../data/angelProjects';
 import { AngelMemoryDataManager } from './AngelMemoryDataManager';
 import { AngelCommunicationTuning } from './AngelCommunicationTuning';
+import { AngelDoctorPanel } from './AngelDoctorPanel';
 import { extractFileToMemories } from '../../utils/fileExtractor';
+import { readJson, writeJson } from '../../utils/safeStorage';
+
+/** Shape of GET /api/angel/status, used to label the UI with facts. */
+interface AngelStatus {
+  hasApiKey: boolean;
+  activeModel: string | null;
+  availableModels: string[];
+  mode: 'model+offline-core' | 'offline-core-only';
+  storage: { documents: number; characters: number; conversationTurns: number };
+  knowledge?: { finance?: { entries?: number }; communication?: { exemplars?: number } };
+}
+
+const COMM_CONFIG_KEY = 'angel_companion_comm_config_v2';
+const CHAT_HISTORY_KEY = 'angel_companion_chat_history_v4';
+
+/** Human label for where an answer actually came from. */
+function sourceLabel(metadata: AngelChatMessage['metadata']): string {
+  if (!metadata?.source) return 'Live context';
+  if (metadata.source === 'offline-core') return 'Offline core (no model)';
+  return metadata.model ? `Model: ${metadata.model}` : 'Model';
+}
 
 interface AngelCompanionModalProps {
   isOpen: boolean;
@@ -36,10 +70,12 @@ export const AngelCompanionModal: React.FC<AngelCompanionModalProps> = ({ isOpen
     activeProject,
     goldMemories,
     addGoldMemory,
-    addGoldMemoriesBatch
+    addGoldMemoriesBatch,
+    syncMemoriesWithServer
   } = useTrading();
 
-  const [activeTab, setActiveTab] = useState<'chat' | 'memory' | 'tuning'>('chat');
+  const [activeTab, setActiveTab] = useState<'chat' | 'memory' | 'tuning' | 'doctor'>('chat');
+  const [status, setStatus] = useState<AngelStatus | null>(null);
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -53,47 +89,43 @@ export const AngelCompanionModal: React.FC<AngelCompanionModalProps> = ({ isOpen
 
   // Communication & Etiquette Configuration
   const [commConfig, setCommConfig] = useState<AngelCommunicationConfig>(() => {
-    try {
-      const saved = localStorage.getItem('angel_companion_comm_config_v2');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed && typeof parsed === 'object') return { ...DEFAULT_ANGEL_COMMUNICATION_CONFIG, ...parsed };
-      }
-    } catch {}
-    return DEFAULT_ANGEL_COMMUNICATION_CONFIG;
+    const saved = readJson<Partial<AngelCommunicationConfig> | null>(
+      COMM_CONFIG_KEY,
+      null,
+      (value) => typeof value === 'object' && value !== null,
+    );
+    return saved ? { ...DEFAULT_ANGEL_COMMUNICATION_CONFIG, ...saved } : DEFAULT_ANGEL_COMMUNICATION_CONFIG;
   });
 
   // Chat message history (persisted in localStorage)
   const [messages, setMessages] = useState<AngelChatMessage[]>(() => {
-    try {
-      const saved = localStorage.getItem('angel_companion_chat_history_v4');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    } catch {}
+    const saved = readJson<AngelChatMessage[] | null>(CHAT_HISTORY_KEY, null, Array.isArray);
+    if (saved && saved.length > 0) return saved;
     return [
       {
         id: 'msg-welcome-1',
         sender: 'angel',
-        text: `### 👼 Good day and warmest greetings! I am ANGEL.
-It is an honor and a true pleasure to assist you. I am your **Gold (XAU/USD) Trading AI Companion**, equipped with active neural memory data and real-time document intelligence.
+        text: `Hi — I'm ANGEL.
 
-* **Live Market Feed**: ${activeInstrument.symbol} at **$${activeInstrument.currentPrice.toFixed(2)}** • [${timeframe.toUpperCase()}] Resolution
-* **Active Session**: ${currentSession.activeSessionsSummary}
-* **Gold Neural Memory**: **1 Master File (ANGEL X)** loaded into my immediate analytical context (combining all 22 master corpora, strategies & directives).
+I read the documents you upload, do the maths myself instead of guessing it, and tell you where every answer came from. Ask me in English, Tagalog, or a mix of both; I'll follow your lead.
 
-I actively read and cite your master knowledge file **ANGEL X**, custom strategy rules, macro data, and trade notes. You can view or manage the file in the **ANGEL X Storage** tab. How may I best assist you today?`,
+Right now I'm watching ${activeInstrument.symbol} at $${activeInstrument.currentPrice.toFixed(2)} on the ${timeframe.toUpperCase()} — ${currentSession.activeSessionsSummary}.
+
+A few things I'm good at:
+• "Account is 10,000, risk 1%, entry 2650, stop 2647.5 — what lot size?" (I compute it exactly)
+• "What do my own notes say about trading the news?" (I quote the file)
+• "Bakit ako laging nag-o-overtrade?" (I'll answer in Taglish)
+
+Drop a file or a .zip into the chat and I'll index it. If I ever sound wrong, hit the 👎 under my reply and tell me why — I adjust.`,
         timestamp: Date.now()
       }
     ];
   });
 
-  // Save chat history
+  // Save chat history. If this fails (quota), safeStorage logs why — the
+  // conversation still lives on the server, which is the durable copy.
   useEffect(() => {
-    try {
-      localStorage.setItem('angel_companion_chat_history_v4', JSON.stringify(messages.slice(-30)));
-    } catch {}
+    writeJson(CHAT_HISTORY_KEY, messages.slice(-30));
   }, [messages]);
 
   // Scroll to bottom on new message
@@ -103,76 +135,125 @@ I actively read and cite your master knowledge file **ANGEL X**, custom strategy
     }
   }, [messages, isOpen, activeTab]);
 
-  // Handle direct file and zip upload from chat bar
+  // Pull real capability info so the header states facts rather than slogans.
+  const refreshStatus = useCallback(async () => {
+    try {
+      const response = await fetch('/api/angel/status');
+      if (!response.ok) return;
+      setStatus(await response.json());
+    } catch {
+      // Server unreachable: the header simply falls back to "checking…".
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    void refreshStatus();
+  }, [isOpen, refreshStatus]);
+
+  // Handle direct file and zip upload from the chat bar.
+  //
+  // The server extractor is tried FIRST, not as a fallback: it reads PDF,
+  // DOCX, XLSX, PPTX and nested archives, it stores the full text where
+  // retrieval happens, and it dedupes. The browser path only runs if the
+  // server is unreachable, so an offline user still gets their file indexed.
   const handleChatFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
+      const isZip = file.name.toLowerCase().endsWith('.zip');
       try {
-        const isZip = file.name.toLowerCase().endsWith('.zip') || file.type.includes('zip');
-        setQuickUploadStatus(isZip ? `Unpacking archive "${file.name}"...` : `Reading "${file.name}"...`);
+        setQuickUploadStatus(
+          `${isZip ? 'Unpacking' : 'Reading'} "${file.name}" (${(file.size / 1024 / 1024).toFixed(1)} MB)…`,
+        );
 
-        let memories: any[] = [];
-        let summaryMessage = '';
+        const response = await fetch(`/api/angel/upload?filename=${encodeURIComponent(file.name)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: file,
+        });
 
-        try {
-          const res = await extractFileToMemories(file);
-          memories = res.memories;
-          summaryMessage = res.summaryMessage;
-        } catch (clientErr) {
-          console.warn('Browser extraction failed, using server upload engine:', clientErr);
-          setQuickUploadStatus(`Uploading "${file.name}" to ANGEL neural engine...`);
-          const serverRes = await fetch(`/api/angel/upload?filename=${encodeURIComponent(file.name)}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/octet-stream' },
-            body: file
-          });
-          if (!serverRes.ok) throw new Error(`Server returned HTTP ${serverRes.status}`);
-          const data = await serverRes.json();
-          if (!data.success || !Array.isArray(data.memories) || data.memories.length === 0) {
-            throw new Error(data.message || 'No readable data extracted from file');
-          }
-          memories = data.memories;
-          summaryMessage = data.summary || `✓ Indexed ${memories.length} item(s) from "${file.name}"`;
+        const data = await response.json().catch(() => null);
+
+        if (!response.ok || !data?.success) {
+          // A 422 means the file was read but held no text — say which and why
+          // rather than pretending the upload worked.
+          const reason = data?.message || data?.error || `server returned HTTP ${response.status}`;
+          throw new Error(reason);
         }
 
-        if (memories.length === 1) {
-          addGoldMemory(memories[0]);
-        } else if (memories.length > 1) {
-          addGoldMemoriesBatch(memories);
-        }
+        const documents: any[] = Array.isArray(data.documents) ? data.documents : [];
+        const warnings: string[] = Array.isArray(data.warnings) ? data.warnings : [];
 
-        // Notify user in chat with rich intelligence summary
-        setMessages(prev => [
+        // The server store is authoritative. Re-pull the index rather than
+        // inventing local copies, so ids match on both sides and nothing is
+        // double-counted.
+        if (documents.length > 0) await syncMemoriesWithServer();
+
+        const totalChars = documents.reduce((sum, document) => sum + Number(document.characters ?? 0), 0);
+        const lines = [
+          `**${file.name}** indexed in ${((data.elapsedMs ?? 0) / 1000).toFixed(1)}s.`,
+          '',
+          `• Documents added: **${documents.length}**${data.duplicates ? ` (${data.duplicates} skipped as duplicates)` : ''}`,
+          `• Text extracted: **${totalChars.toLocaleString()} characters**`,
+        ];
+        if (documents.length > 0) {
+          lines.push(`• Files: ${documents.slice(0, 8).map((d) => d.fileName ?? d.title).join(', ')}${documents.length > 8 ? `, +${documents.length - 8} more` : ''}`);
+        }
+        if (warnings.length > 0) {
+          lines.push('', '**Could not fully read:**', ...warnings.slice(0, 6).map((warning) => `• ${warning}`));
+        }
+        lines.push('', 'Ask me anything about it — I quote the file and name it when I do.');
+
+        setMessages((prev) => [
           ...prev,
           {
             id: `sys-upload-${Date.now()}-${i}`,
             sender: 'angel',
-            text: `### 📁 ${memories.length > 1 ? `Archived Intelligence Unpacked: "${file.name}"` : `Document Indexed: "${file.name}"`}
-**${summaryMessage}**
-
-* **Total Neural Memories Added**: **${memories.length}** item(s)
-* **Categories Assigned**: ${Array.from(new Set(memories.map(m => m.category))).join(', ')}
-* **Neural Retention Status**: **Active & Permanently Saved**. I will actively reference, cross-examine, and cite these documents in our analysis against **${activeInstrument.symbol}** ($${activeInstrument.currentPrice.toFixed(2)}).
-
-*How would you like to review or apply these rules to our active session, ${commConfig.userPreferredName}?*`,
-            timestamp: Date.now()
-          }
+            text: lines.join('\n'),
+            timestamp: Date.now(),
+          },
         ]);
 
-        setQuickUploadStatus(summaryMessage);
-        setTimeout(() => setQuickUploadStatus(null), 4000);
-
-        // Automatically command ANGEL to read the file, extract its data, and execute instructions
-        setTimeout(() => {
-          handleSendMessage(`ANGEL, please read the uploaded file "${file.name}". Provide all necessary info and data from it, and execute what is requested.`);
-        }, 500);
-      } catch (err: any) {
-        console.error('Chat file upload failed:', err);
-        setQuickUploadStatus(`Upload failed: ${err.message || 'Could not parse file'}`);
+        setQuickUploadStatus(data.summary || `Indexed ${documents.length} document(s) from "${file.name}"`);
         setTimeout(() => setQuickUploadStatus(null), 5000);
+        void refreshStatus();
+      } catch (serverError: any) {
+        // Server-side extraction unavailable — fall back to the browser reader.
+        console.warn('Server extraction failed, trying the browser reader:', serverError);
+        try {
+          setQuickUploadStatus(`Server unavailable — reading "${file.name}" in the browser…`);
+          const res = await extractFileToMemories(file);
+          if (res.memories.length === 0) throw new Error('No readable text found in this file.');
+          if (res.memories.length === 1) addGoldMemory(res.memories[0]);
+          else addGoldMemoriesBatch(res.memories);
+
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `sys-upload-${Date.now()}-${i}`,
+              sender: 'angel',
+              text: `**${file.name}** was read in your browser because the server extractor was unreachable (${serverError?.message || 'no response'}).\n\n• Documents added: **${res.memories.length}**\n\nBrowser extraction is weaker than the server's — it cannot read PDF, DOCX or XLSX properly. Re-upload once the server is back for a complete index.`,
+              timestamp: Date.now(),
+            },
+          ]);
+          setQuickUploadStatus(res.summaryMessage);
+          setTimeout(() => setQuickUploadStatus(null), 5000);
+        } catch (clientError: any) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `sys-upload-fail-${Date.now()}-${i}`,
+              sender: 'angel',
+              text: `I could not read **${file.name}**.\n\n• Server: ${serverError?.message || 'unreachable'}\n• Browser: ${clientError?.message || 'failed'}\n\nIf it is a scanned PDF there is no text layer to extract — run OCR on it first, or paste the key passages into a note in ANGEL X Storage.`,
+              timestamp: Date.now(),
+            },
+          ]);
+          setQuickUploadStatus(`Could not read "${file.name}".`);
+          setTimeout(() => setQuickUploadStatus(null), 6000);
+        }
       }
     }
 
@@ -181,7 +262,14 @@ I actively read and cite your master knowledge file **ANGEL X**, custom strategy
     }
   };
 
-  // Send message to AI
+  /**
+   * Send a message to ANGEL.
+   *
+   * The browser no longer scores or ships documents: the server owns the
+   * corpus and does BM25 retrieval over it, so the request body stays small
+   * and the ranking is the same one the diagnostics tests cover. Only
+   * documents that live solely in this browser are passed along.
+   */
   const handleSendMessage = async (textToSend?: string) => {
     const message = (textToSend || inputMessage).trim();
     if (!message || isLoading) return;
@@ -206,74 +294,26 @@ I actively read and cite your master knowledge file **ANGEL X**, custom strategy
         marketStatus: isMarketClosed ? 'CLOSED' : 'OPEN',
         isMarketClosed,
         marketClosureReason,
-        confluenceScore: 84,
-        rsi: 52
       };
 
-      // Smart memory context selection: rank by relevance and prioritize uploaded files
-      const activeList = (goldMemories || []).filter(m => m && m.isActive !== false);
-      const isAskingToReadFile = /read|file|upload|document|provide|do it|do this|dataset|data set|storage/i.test(message);
-      const queryTerms = message.toLowerCase().split(/\s+/).filter(w => w.length > 2);
-
-      // Score items by relevance to message with high priority for uploaded files
-      const scored = activeList.map(m => {
-        let score = 0;
-        const titleLower = (m.title || '').toLowerCase();
-        const fileNameLower = (m.fileName || '').toLowerCase();
-        const catLower = (m.category || '').toLowerCase();
-        const contentLower = typeof m.content === 'string' ? m.content.toLowerCase().slice(0, 5000) : '';
-
-        // If user asks to read file or execute, heavily boost actual uploaded files
-        if (m.sourceType === 'FILE_UPLOAD') {
-          if (isAskingToReadFile) score += 60;
-          if (m.createdAt && Date.now() - m.createdAt < 86400000 * 3) {
-            score += 30;
-          }
-        }
-
-        for (const term of queryTerms) {
-          if (fileNameLower.includes(term)) score += 12;
-          if (titleLower.includes(term)) score += 6;
-          if (catLower.includes(term)) score += 3;
-          if (contentLower.includes(term)) score += 2;
-        }
-        return { item: m, score };
-      });
-
-      scored.sort((a, b) => b.score - a.score);
-
-      // Top 8 most relevant receive full content (up to 8,000 chars), remaining send compact metadata
-      const sanitizedMemories = scored.slice(0, 8).map(({ item }) => ({
-        id: item.id,
-        title: item.title,
-        category: item.category,
-        sourceType: item.sourceType,
-        fileName: item.fileName,
-        isActive: item.isActive,
-        createdAt: item.createdAt,
-        updatedAt: item.updatedAt,
-        tags: item.tags,
-        content: typeof item.content === 'string' && item.content.length > 8000
-          ? item.content.slice(0, 8000) + '\n\n[...Additional content indexed in neural memory...]'
-          : item.content
-      }));
-
-      // Append compact catalog of remaining documents so AI knows they exist
-      const remainingTitles = scored.slice(8).map(s => s.item.title);
-      if (remainingTitles.length > 0) {
-        sanitizedMemories.push({
-          id: 'catalog-index',
-          title: `Master Document Catalog (${remainingTitles.length} additional documents)`,
-          category: 'CUSTOM_DATA' as any,
-          sourceType: 'TEXT_NOTE' as any,
-          fileName: 'catalog-index',
-          isActive: true,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-          tags: ['Index', 'Catalog'],
-          content: `Additional indexed active documents: ${remainingTitles.join(', ')}`
-        });
-      }
+      // Browser-only documents: anything whose full text is not yet mirrored
+      // on the server. Capped so a huge local corpus cannot blow up the body.
+      const localOnly = (goldMemories || [])
+        .filter(m => m && m.isActive !== false && typeof m.content === 'string')
+        .filter(m => !m.content.startsWith('[Stored on server') && !m.content.includes('more characters stored on the server'))
+        .slice(0, 12)
+        .map(m => ({
+          id: m.id,
+          title: m.title,
+          category: m.category,
+          sourceType: m.sourceType,
+          fileName: m.fileName,
+          isActive: m.isActive,
+          createdAt: m.createdAt,
+          updatedAt: m.updatedAt,
+          tags: m.tags,
+          content: m.content.length > 20000 ? `${m.content.slice(0, 20000)}\n[truncated locally]` : m.content,
+        }));
 
       const response = await fetch('/api/angel/chat', {
         method: 'POST',
@@ -282,57 +322,98 @@ I actively read and cite your master knowledge file **ANGEL X**, custom strategy
           message,
           project: activeProject,
           marketContext,
-          history: messages.slice(-8),
-          persona: 'QUANT',
+          history: messages.slice(-8).map(m => ({ sender: m.sender, text: m.text })),
           communicationConfig: commConfig,
-          memoryData: sanitizedMemories
+          memoryData: localOnly,
         })
       });
 
-      if (!response.ok) {
-        throw new Error(`Server returned status ${response.status}`);
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok || !data) {
+        throw new Error(data?.message || `Server returned status ${response.status}`);
       }
 
-      const data = await response.json();
-      const replyText = data.reply || "I am listening attentively and reviewing your gold memories.";
-
       const angelMsg: AngelChatMessage = {
-        id: `angel-${Date.now()}`,
+        id: data.messageId || `angel-${Date.now()}`,
         sender: 'angel',
-        text: replyText,
+        text: data.reply || 'I did not produce a reply. Try asking again.',
         timestamp: Date.now(),
         metadata: {
           projectUsed: activeProject.name,
           timeframe,
           price: activeInstrument.currentPrice,
-          memoriesRead: data.memoriesRead ?? activeMemoryCount
+          memoriesRead: data.documentsUsed,
+          documentsSearched: data.documentsSearched,
+          documentsUsed: data.documentsUsed,
+          source: data.source,
+          model: data.model,
+          degraded: data.degraded === true,
+          degradedReason: data.degradedReason,
+          latencyMs: data.latencyMs,
+          language: data.language,
+          citations: Array.isArray(data.citations) ? (data.citations as AngelCitation[]) : [],
+          calculations: Array.isArray(data.calculations) ? (data.calculations as AngelCalculationTrace[]) : [],
         }
       };
 
       setMessages(prev => [...prev, angelMsg]);
+      void refreshStatus();
     } catch (err: any) {
-      console.error('Failed to communicate with ANGEL backend:', err);
-      const activeMemList = goldMemories.filter(m => m.isActive);
-      const fallbackMsg: AngelChatMessage = {
-        id: `angel-${Date.now()}`,
+      // The server itself is unreachable (offline, crashed, proxy down).
+      // Say so plainly instead of improvising a confident-sounding answer.
+      console.error('Failed to reach the ANGEL backend:', err);
+      setMessages(prev => [...prev, {
+        id: `angel-error-${Date.now()}`,
         sender: 'angel',
-        text: `### 👼 ANGEL Gold Companion Guidance
-*Greeting, ${commConfig.userPreferredName}. It is an honor to assist you.*
+        text: `I could not reach my backend, so I have no answer for you — only an explanation.
 
-**Live Spot**: ${activeInstrument.symbol} at **$${activeInstrument.currentPrice.toFixed(2)}** • [${timeframe.toUpperCase()}]
-**Active Session**: ${currentSession.activeSessionsSummary}
-**Gold Memory Synchronized**: ${activeMemList.length} active documents indexed.
+**What failed:** ${err?.message || 'the request did not complete'}
 
-${activeMemList.length > 0 ? `I have verified your top memory: **"${activeMemList[0].title}"** (${activeMemList[0].category}). All market observations are aligned with your recorded parameters.` : 'You can upload documents or add custom gold notes in the Memory Data tab anytime.'}
+**What still works:** your ${activeMemoryCount} active document(s) are safe in local storage, and the chat history is intact.
 
-I am watching the order flow attentively for you. Please maintain discipline and protect your capital.`,
-        timestamp: Date.now()
-      };
-      setMessages(prev => [...prev, fallbackMsg]);
+**What to try:** check that the app server is running (\`npm run dev\`), then send the message again. The Doctor tab will tell you exactly which part is down.`,
+        timestamp: Date.now(),
+        metadata: { degraded: true, degradedReason: 'Backend unreachable from the browser.' }
+      }]);
     } finally {
       setIsLoading(false);
     }
   };
+
+  /** Send 👍/👎 and surface the concrete adjustment ANGEL made. */
+  const sendFeedback = async (messageId: string, rating: 'UP' | 'DOWN', reason?: string) => {
+    setMessages(prev => prev.map(m => (
+      m.id === messageId ? { ...m, metadata: { ...m.metadata, feedback: rating } } : m
+    )));
+    try {
+      const response = await fetch('/api/angel/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messageId, rating, reason })
+      });
+      if (!response.ok) return;
+      const data = await response.json();
+      if (data?.adjustment) {
+        setMessages(prev => prev.map(m => (
+          m.id === messageId ? { ...m, metadata: { ...m.metadata, feedbackAdjustment: data.adjustment } } : m
+        )));
+      }
+    } catch {
+      // Feedback is best-effort; the thumb state still shows locally.
+    }
+  };
+
+  /** Reasons offered after a 👎, each mapped to a real behavioural change. */
+  const DOWN_REASONS: { id: string; label: string }[] = [
+    { id: 'TOO_LONG', label: 'Too long' },
+    { id: 'TOO_SHORT', label: 'Too short' },
+    { id: 'WRONG_LANGUAGE', label: 'Wrong language' },
+    { id: 'INACCURATE', label: 'Inaccurate' },
+    { id: 'GENERIC', label: 'Too generic' },
+    { id: 'TOO_FORMAL', label: 'Too formal' },
+  ];
+  const [reasonPromptFor, setReasonPromptFor] = useState<string | null>(null);
 
   const [isDownloadingPackage, setIsDownloadingPackage] = useState(false);
 
@@ -450,9 +531,28 @@ Greetings, **${commConfig.userPreferredName}**. I have refreshed our chat feed. 
               <div className="flex items-center gap-2">
                 <h2 className="text-base font-bold text-white tracking-wide flex items-center gap-1.5">
                   ANGEL
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                    AI Gold Companion
+                  {/* States what is actually running, not a slogan. */}
+                  <span
+                    className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
+                      !status
+                        ? 'bg-slate-500/20 text-slate-300 border-slate-500/30'
+                        : status.mode === 'model+offline-core'
+                          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                          : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                    }`}
+                    title={
+                      status?.activeModel
+                        ? `Answers come from ${status.activeModel}, with an offline core as backup.`
+                        : 'No model key configured — the offline core answers everything.'
+                    }
+                  >
+                    {!status ? 'checking…' : (status.activeModel ?? 'offline core')}
                   </span>
+                  {status && (
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-[#131C2E] text-slate-400 border border-[#23314E]">
+                      {status.storage.documents} docs · {(status.storage.characters / 1000).toFixed(0)}k chars
+                    </span>
+                  )}
                 </h2>
               </div>
             </div>
@@ -510,9 +610,9 @@ Greetings, **${commConfig.userPreferredName}**. I have refreshed our chat feed. 
               }`}
             >
               <Database className="w-3.5 h-3.5 text-amber-400" />
-              <span>ANGEL X Storage</span>
+              <span>Documents</span>
               <span className="text-[10px] font-mono px-2 py-0.2 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                1 File: ANGEL X
+                {activeMemoryCount}
               </span>
             </button>
 
@@ -526,11 +626,30 @@ Greetings, **${commConfig.userPreferredName}**. I have refreshed our chat feed. 
               }`}
             >
               <Brain className="w-3.5 h-3.5 text-cyan-400" />
-              <span className="hidden sm:inline">Gemini Companion</span>
-              <span className="sm:hidden">Corpus</span>
-              <span className="text-[10px] font-mono px-2 py-0.2 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
-                5 Vols
-              </span>
+              <span className="hidden sm:inline">Communication</span>
+              <span className="sm:hidden">Style</span>
+              {status?.knowledge?.communication?.exemplars !== undefined && (
+                <span className="text-[10px] font-mono px-2 py-0.2 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+                  {status.knowledge.communication.exemplars} examples
+                </span>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab('doctor')}
+              title="See exactly what is working, what is broken, and let ANGEL repair what it can"
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer ${
+                activeTab === 'doctor'
+                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-[#131C2E]'
+              }`}
+            >
+              <Stethoscope className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="hidden sm:inline">Doctor</span>
+              {status && status.mode === 'offline-core-only' && (
+                <AlertTriangle className="w-3 h-3 text-amber-400" />
+              )}
             </button>
           </div>
 
@@ -615,31 +734,195 @@ Greetings, **${commConfig.userPreferredName}**. I have refreshed our chat feed. 
                   >
                     {msg.text}
 
-                    {msg.sender === 'angel' && (
-                      <div className="mt-3 pt-2 border-t border-[#182338] flex items-center justify-between text-[10px] text-slate-400 font-mono">
-                        <div className="flex items-center gap-2">
-                          <span className="text-emerald-400">● Live Context Active</span>
-                          <span>•</span>
-                          <span>Spot: ${activeInstrument.currentPrice.toFixed(2)}</span>
+                    {/* Degraded banner: say the model was unavailable rather
+                        than letting the fallback masquerade as the real thing. */}
+                    {msg.sender === 'angel' && msg.metadata?.degraded && (
+                      <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 flex items-start gap-2">
+                        <WifiOff className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                        <div className="text-[10px] font-mono text-amber-200/90 leading-relaxed">
+                          <div className="font-bold text-amber-200">Answered without the language model.</div>
+                          <div className="mt-0.5 break-words">
+                            {msg.metadata.degradedReason || 'The model could not be reached.'}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setActiveTab('doctor')}
+                            className="mt-1 underline underline-offset-2 hover:text-amber-100 cursor-pointer"
+                          >
+                            Open Doctor to see why →
+                          </button>
                         </div>
+                      </div>
+                    )}
 
-                        <button
-                          type="button"
-                          onClick={() => copyToClipboard(msg.id, msg.text)}
-                          className="text-slate-400 hover:text-white flex items-center gap-1 transition-colors cursor-pointer"
-                        >
-                          {copiedId === msg.id ? (
+                    {/* Verified calculations, computed in code, not guessed. */}
+                    {msg.sender === 'angel' && (msg.metadata?.calculations?.length ?? 0) > 0 && (
+                      <div className="mt-3 space-y-2">
+                        {msg.metadata!.calculations!.map((calculation, index) => (
+                          <div
+                            key={`${msg.id}-calc-${index}`}
+                            className="rounded-lg border border-cyan-500/25 bg-cyan-500/5 px-3 py-2"
+                          >
+                            <div className="flex items-center gap-1.5 text-[10px] font-mono text-cyan-300 font-bold">
+                              <Calculator className="w-3 h-3" />
+                              {calculation.result ? calculation.result.title : calculation.tool.replace(/_/g, ' ')}
+                              <span className="text-cyan-500/70 font-normal">· computed exactly</span>
+                            </div>
+
+                            {calculation.result ? (
+                              <>
+                                <div className="mt-1 text-[11px] text-slate-100 font-mono">
+                                  {calculation.result.headline}
+                                </div>
+                                {calculation.result.steps.length > 0 && (
+                                  <details className="mt-1">
+                                    <summary className="text-[10px] font-mono text-slate-500 cursor-pointer hover:text-slate-300">
+                                      show the working
+                                    </summary>
+                                    <ul className="mt-1 space-y-0.5">
+                                      {calculation.result.steps.map((step, stepIndex) => (
+                                        <li key={stepIndex} className="text-[10px] font-mono text-slate-400">
+                                          <span className="text-slate-500">{step.label}: </span>
+                                          {step.expression ? `${step.expression} = ` : ''}
+                                          <span className="text-slate-200">{step.value}</span>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </details>
+                                )}
+                                {calculation.result.notes?.map((note, noteIndex) => (
+                                  <div key={noteIndex} className="mt-1 text-[10px] font-mono text-amber-300/80">
+                                    ⚠ {note}
+                                  </div>
+                                ))}
+                              </>
+                            ) : (
+                              <div className="mt-1 text-[10px] font-mono text-slate-400">
+                                Needs {calculation.missing?.join(', ') || 'more detail'} before I can compute this.
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Citations: what ANGEL actually read, with a quote. */}
+                    {msg.sender === 'angel' && (msg.metadata?.citations?.length ?? 0) > 0 && (
+                      <details className="mt-3 rounded-lg border border-[#1D2942] bg-[#0A0F1B] px-3 py-2">
+                        <summary className="text-[10px] font-mono text-slate-400 cursor-pointer hover:text-slate-200 flex items-center gap-1.5">
+                          <FileText className="w-3 h-3 text-emerald-400" />
+                          Sources read: {msg.metadata!.citations!.length} of {msg.metadata?.documentsSearched ?? 0} documents searched
+                        </summary>
+                        <ul className="mt-2 space-y-2">
+                          {msg.metadata!.citations!.map((citation, index) => (
+                            <li key={index} className="border-l-2 border-emerald-500/30 pl-2">
+                              <div className="text-[10px] font-mono text-emerald-300 break-all">
+                                {citation.fileName || citation.title}
+                                {citation.heading && <span className="text-slate-500"> › {citation.heading}</span>}
+                                <span className="text-slate-600"> · match {citation.score.toFixed(2)}</span>
+                              </div>
+                              {citation.snippet && (
+                                <div className="text-[10px] text-slate-400 italic mt-0.5 leading-relaxed">
+                                  “{citation.snippet}”
+                                </div>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
+                    )}
+
+                    {/* Footer: provenance + feedback */}
+                    {msg.sender === 'angel' && (
+                      <div className="mt-3 pt-2 border-t border-[#182338] flex items-center justify-between gap-2 text-[10px] text-slate-400 font-mono flex-wrap">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className={msg.metadata?.degraded ? 'text-amber-400' : 'text-emerald-400'}>
+                            ● {sourceLabel(msg.metadata)}
+                          </span>
+                          {msg.metadata?.latencyMs !== undefined && (
                             <>
-                              <Check className="w-3 h-3 text-emerald-400" />
-                              <span className="text-emerald-400">Copied</span>
-                            </>
-                          ) : (
-                            <>
-                              <Copy className="w-3 h-3" />
-                              <span>Copy</span>
+                              <span>•</span>
+                              <span>{(msg.metadata.latencyMs / 1000).toFixed(1)}s</span>
                             </>
                           )}
-                        </button>
+                          {msg.metadata?.language && msg.metadata.language !== 'en' && (
+                            <>
+                              <span>•</span>
+                              <span className="text-cyan-400">{msg.metadata.language === 'tl' ? 'Tagalog' : 'Taglish'}</span>
+                            </>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            title="This answer was good"
+                            onClick={() => sendFeedback(msg.id, 'UP')}
+                            className={`flex items-center gap-1 transition-colors cursor-pointer ${
+                              msg.metadata?.feedback === 'UP' ? 'text-emerald-400' : 'text-slate-500 hover:text-emerald-400'
+                            }`}
+                          >
+                            <ThumbsUp className="w-3 h-3" />
+                          </button>
+                          <button
+                            type="button"
+                            title="Something was wrong with this answer"
+                            onClick={() => setReasonPromptFor(reasonPromptFor === msg.id ? null : msg.id)}
+                            className={`flex items-center gap-1 transition-colors cursor-pointer ${
+                              msg.metadata?.feedback === 'DOWN' ? 'text-rose-400' : 'text-slate-500 hover:text-rose-400'
+                            }`}
+                          >
+                            <ThumbsDown className="w-3 h-3" />
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => copyToClipboard(msg.id, msg.text)}
+                            className="text-slate-400 hover:text-white flex items-center gap-1 transition-colors cursor-pointer"
+                          >
+                            {copiedId === msg.id ? (
+                              <>
+                                <Check className="w-3 h-3 text-emerald-400" />
+                                <span className="text-emerald-400">Copied</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="w-3 h-3" />
+                                <span>Copy</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Reason picker — each option maps to a real change. */}
+                    {msg.sender === 'angel' && reasonPromptFor === msg.id && (
+                      <div className="mt-2 rounded-lg border border-rose-500/25 bg-rose-500/5 p-2">
+                        <div className="text-[10px] font-mono text-rose-200 mb-1.5">What was wrong? I will adjust.</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {DOWN_REASONS.map((reason) => (
+                            <button
+                              key={reason.id}
+                              type="button"
+                              onClick={() => {
+                                void sendFeedback(msg.id, 'DOWN', reason.id);
+                                setReasonPromptFor(null);
+                              }}
+                              className="text-[10px] font-mono px-2 py-1 rounded border border-rose-500/30 text-rose-200 hover:bg-rose-500/20 transition-colors cursor-pointer"
+                            >
+                              {reason.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* What ANGEL changed in response. */}
+                    {msg.sender === 'angel' && msg.metadata?.feedbackAdjustment && (
+                      <div className="mt-2 rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-1.5 text-[10px] font-mono text-emerald-300 flex items-start gap-1.5">
+                        <CheckCircle2 className="w-3 h-3 shrink-0 mt-0.5" />
+                        <span>{msg.metadata.feedbackAdjustment}</span>
                       </div>
                     )}
                   </div>
@@ -733,20 +1016,21 @@ Greetings, **${commConfig.userPreferredName}**. I have refreshed our chat feed. 
           </div>
         )}
 
-        {/* Tab 2: Gold Memory Data & Uploaded Documents Manager */}
+        {/* Tab 2: Document storage manager */}
         {activeTab === 'memory' && (
           <AngelMemoryDataManager onAskAboutMemory={handleAskAboutMemory} />
         )}
 
-        {/* Tab 3: Gemini Companion & 5.0 GB Master Communication Corpus Tuning */}
+        {/* Tab 4: Self-diagnosis and repair */}
+        {activeTab === 'doctor' && <AngelDoctorPanel />}
+
+        {/* Tab 3: Communication style tuning */}
         {activeTab === 'tuning' && (
           <AngelCommunicationTuning
             config={commConfig}
             onChangeConfig={(newCfg) => {
               setCommConfig(newCfg);
-              try {
-                localStorage.setItem('angel_companion_comm_config_v2', JSON.stringify(newCfg));
-              } catch {}
+              writeJson(COMM_CONFIG_KEY, newCfg);
             }}
             onSelectPrompt={(promptText) => {
               setActiveTab('chat');

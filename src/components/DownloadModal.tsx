@@ -109,14 +109,16 @@ export const DownloadModal: React.FC<DownloadModalProps> = ({ isOpen, onClose })
                   AI ANGEL Master Intelligence Package
                 </span>
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
-                  Real Byte Storage • Full Code, JSON & Blank Data
+                  Everything ANGEL knows, in one portable archive
                 </span>
               </div>
               <h3 className="text-sm font-bold text-white">
                 Download Master File ANGEL X (.ZIP)
               </h3>
               <p className="text-xs text-slate-300">
-                Consolidated single master file ANGEL X merging all 22 datasets, offline CLI runners (Node.js & Python), 90 Directives Constitution, and dialogue logs.
+                Your documents as individual files plus a restorable JSON database, the full
+                conversation transcript, the system directives ANGEL runs on, and standalone
+                Node.js and Python runners. Re-upload the .zip to any instance to restore it.
               </p>
             </div>
 

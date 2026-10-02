@@ -3,20 +3,49 @@ import path from 'path';
 import fs from 'fs';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
-import { createRequire } from 'module';
 import { createServer as createViteServer } from 'vite';
-
-const require = createRequire(import.meta.url);
-const archiver = require('archiver');
-const ZipArchive = archiver.ZipArchive || archiver;
+import * as archiver from 'archiver';
 import JSZip from 'jszip';
+
+// `archiver` is CommonJS and exposes the constructor as a named property.
+// This used to go through createRequire(import.meta.url), which esbuild
+// compiles to an empty string in the CJS production bundle — meaning the
+// download endpoints worked in dev and threw in production.
+const ZipArchive: new (options?: archiver.ArchiverOptions) => archiver.Archiver =
+  (archiver as unknown as { ZipArchive?: new (options?: archiver.ArchiverOptions) => archiver.Archiver }).ZipArchive ??
+  (archiver as unknown as new (options?: archiver.ArchiverOptions) => archiver.Archiver);
 import { INITIAL_GOLD_MEMORIES, ANGEL_X_MASTER_FILE, ANGEL_X_CONTENT } from './src/data/goldMemoryData';
 import { generateBlankDataBlocks, formatBytes } from './src/data/angelStorageExpander';
+
+// --- ANGEL intelligence layer -------------------------------------------
+import { getStore } from './src/server/store';
+import { extractFile, extractArchive } from './src/server/extractors';
+import { generateWithFailover, getRouterState } from './src/server/modelRouter';
+import { runDiagnostics, scanSource } from './src/server/diagnostics';
+import {
+  gatherGrounding,
+  knowledgeBaseReport,
+  invalidateKnowledgeBase,
+  type MemoryLike,
+} from './src/ai/knowledgeBase';
+import { buildSystemPrompt, enforcePromptBudget } from './src/ai/promptBuilder';
+import { detectCalculations, FINANCE_TOOL_CATALOG } from './src/ai/financeTools';
+import { runOfflineCore } from './src/ai/offlineCore';
+import {
+  observeMessage,
+  recordFeedback,
+  dominantLanguage,
+  feedbackScore,
+  topTopics,
+  profileDirectives,
+} from './src/ai/adaptive';
 
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+// Honour PORT so the app can run behind a platform that assigns one, and so
+// a second instance can be started for testing without a port clash.
+const PORT = Number(process.env.PORT) || 3000;
 
 // High-capacity payload limits for large files, zip archives, and datasets (500mb)
 app.use(express.json({ limit: '500mb' }));
@@ -139,11 +168,12 @@ async function getUnifiedGoldSpot(
   const normCurr = currency.toUpperCase();
 
   // Determine effective API key: prioritize user's manual input if provided, otherwise fallback to process.env.GOLDAPI_KEY or the key provided in .env.example
-  const activeApiKey = (userApiKey && userApiKey.trim() !== '') 
-    ? userApiKey.trim() 
-    : (process.env.GOLDAPI_KEY && process.env.GOLDAPI_KEY.trim() !== '' 
-        ? process.env.GOLDAPI_KEY.trim() 
-        : 'goldapi-5403d0e1a666c2c6afa359500f9588c3-io');
+  // No hardcoded key fallback: a key committed to source is a key that leaks.
+  // Without one the unified feed below falls back to the free public spot
+  // source, which needs no credentials.
+  const activeApiKey = (userApiKey && userApiKey.trim() !== '')
+    ? userApiKey.trim()
+    : (process.env.GOLDAPI_KEY?.trim() || '');
 
   const now = Date.now();
   // Return cached result if updated within the last 1500ms and no explicit custom key and same metal/currency
@@ -630,841 +660,622 @@ app.get('/api/gold-signal', async (req, res) => {
 });
 
 // ==========================================
-// ANGEL AI Companion Engine (Gemini 3.8 Flash)
+// ANGEL AI Engine
 // ==========================================
+// Model name is NOT hardcoded here. The router discovers what the configured
+// key can actually call and fails over between models — see
+// src/server/modelRouter.ts for why that matters.
+
 let geminiAiClient: GoogleGenAI | null = null;
 function getGeminiAiClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey.trim() === '') return null;
+  if (!apiKey || apiKey.trim() === '' || apiKey.trim() === 'MY_GEMINI_API_KEY') return null;
   if (!geminiAiClient) {
     geminiAiClient = new GoogleGenAI({
       apiKey: apiKey.trim(),
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        },
-      },
+      httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
     });
   }
   return geminiAiClient;
 }
 
-// Check ANGEL status
-app.get('/api/angel/status', (_req, res) => {
-  const hasKey = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim() !== '');
+const angelStore = getStore(process.env.ANGEL_DATA_DIR || path.join(process.cwd(), 'data', 'angel-store'));
+
+/** Server documents rendered in the shape the retrieval layer expects. */
+function serverMemories(): MemoryLike[] {
+  return angelStore.loadAllWithText().map((document) => ({
+    id: document.id,
+    title: document.title,
+    content: document.content,
+    category: document.category,
+    sourceType: document.sourceType,
+    fileName: document.fileName,
+    tags: document.tags,
+    isActive: document.isActive,
+    updatedAt: document.updatedAt,
+    createdAt: document.createdAt,
+  }));
+}
+
+/**
+ * Combine server-persisted documents with any the client still holds locally.
+ * The client copy is legacy (browser storage) and is deduplicated by id so a
+ * migrated document is never counted twice.
+ */
+function combinedMemories(clientMemories: unknown): MemoryLike[] {
+  const server = serverMemories();
+  const seen = new Set(server.map((memory) => memory.id));
+  const extra: MemoryLike[] = [];
+
+  if (Array.isArray(clientMemories)) {
+    for (const raw of clientMemories) {
+      if (!raw || typeof raw !== 'object') continue;
+      const memory = raw as Record<string, unknown>;
+      const id = typeof memory.id === 'string' ? memory.id : '';
+      const content = typeof memory.content === 'string' ? memory.content : '';
+      if (!id || !content.trim() || seen.has(id)) continue;
+      seen.add(id);
+      extra.push({
+        id,
+        title: typeof memory.title === 'string' ? memory.title : 'Untitled',
+        content,
+        category: typeof memory.category === 'string' ? memory.category : 'UPLOADED_DOC',
+        sourceType: typeof memory.sourceType === 'string' ? memory.sourceType : 'TEXT_NOTE',
+        fileName: typeof memory.fileName === 'string' ? memory.fileName : undefined,
+        tags: Array.isArray(memory.tags) ? (memory.tags as string[]) : [],
+        isActive: memory.isActive !== false,
+        updatedAt: typeof memory.updatedAt === 'number' ? memory.updatedAt : 0,
+      });
+    }
+  }
+  return [...server, ...extra];
+}
+
+// ---------------------------------------------------------------- status
+
+app.get('/api/angel/status', async (_req, res) => {
+  const ai = getGeminiAiClient();
+  const router = getRouterState();
+  const stats = angelStore.stats();
+  const profile = angelStore.getProfile();
+
   res.json({
     name: 'ANGEL',
-    version: '2.5',
-    model: hasKey ? 'gemini-3.8-flash' : 'deterministic-adaptive-core',
-    hasApiKey: hasKey,
+    version: '3.0',
+    hasApiKey: Boolean(ai),
+    activeModel: router.active,
+    availableModels: router.available.slice(0, 12),
+    blacklistedModels: router.blacklisted,
+    lastModelError: router.lastError,
+    mode: ai ? 'model+offline-core' : 'offline-core-only',
+    storage: {
+      documents: stats.documents,
+      activeDocuments: stats.activeDocuments,
+      characters: stats.totalCharacters,
+      conversationTurns: stats.conversationTurns,
+      persistedAt: stats.root,
+    },
+    profile: {
+      name: profile.preferredName,
+      verbosity: profile.verbosity,
+      language: dominantLanguage(profile),
+      factsLearned: profile.facts.length,
+      messagesSeen: profile.messageCount,
+      feedback: feedbackScore(profile),
+    },
     status: 'ACTIVE',
-    tagline: 'Adaptive Next-Gen Execution & Learning AI Companion'
   });
 });
 
-// Deterministic adaptive reasoning fallback if GEMINI_API_KEY is not set or network fails
-function generateAdaptiveAngelFallback(
-  message: string,
-  project: any,
-  marketContext: any,
-  persona: string = 'QUANT',
-  commConfig?: any,
-  memoryData?: any[]
-): string {
-  const price = marketContext?.price ? `$${Number(marketContext.price).toFixed(2)}` : '$4,379.00';
-  const tf = marketContext?.timeframe || '5m';
-  const symbol = marketContext?.symbol || 'XAU/USD';
-  const session = marketContext?.session || 'London / NY Overlap';
-  const conf = marketContext?.confluenceScore ?? 84;
-  const projectName = project?.name || 'Dominion M1-M15 Gold Scalper';
-  const rules = project?.rules || [
-    'Wait for liquidity sweep before entering',
-    'Cap risk at 1.0% with max 25 pips stop loss',
-    'Move to break-even at 1:1.5 RR'
-  ];
-  const targetRR = project?.riskRewardRatio || '1:2.5';
-  const maxRisk = project?.maxRiskPerTradePercent || 1.0;
-  const userName = commConfig?.userPreferredName || 'Trader';
+// ------------------------------------------------- knowledge base report
 
-  const lowerMsg = message.toLowerCase();
-
-  // Tagalog / Taglish detection & response
-  const isTagalogOrTaglish = (
-    lowerMsg.includes('kumusta') ||
-    lowerMsg.includes('kamusta') ||
-    lowerMsg.includes('salamat') ||
-    lowerMsg.includes('tulungan') ||
-    lowerMsg.includes('tulong') ||
-    lowerMsg.includes('paano') ||
-    lowerMsg.includes('mag-usap') ||
-    lowerMsg.includes('usap') ||
-    lowerMsg.includes('ano') ||
-    lowerMsg.includes('bakit') ||
-    lowerMsg.includes('kasi') ||
-    lowerMsg.includes('pwede') ||
-    lowerMsg.includes('sige') ||
-    lowerMsg.includes('sobrang') ||
-    lowerMsg.includes('hindi') ||
-    lowerMsg.includes('wala') ||
-    lowerMsg.includes('naman') ||
-    lowerMsg.includes('talaga') ||
-    lowerMsg.includes('kaya')
-  );
-
-  if (isTagalogOrTaglish) {
-    if (lowerMsg.includes('salamat')) {
-      return `### 👼 Walang anuman, ${userName}!
-Ikinagagalak kong makatulong sa'yo. Tandaan mo na nandito lang ako lagi bilang iyong companion para tulungan kang mag-isip nang malinaw, mag-organize, at maging mas independent at confident.
-
-Ano pa ang pwede nating pagtulungan o i-organize ngayon?`;
-    }
-    if (lowerMsg.includes('kumusta') || lowerMsg.includes('kamusta')) {
-      return `### 👼 Kumusta, ${userName}!
-Maayos naman ako at handang tumulong sa'yo ngayon. Bilang iyong personal companion, nandito ako para tulungan ka sa pang-araw-araw na gawain, pagpaplano, desisyon, at pag-aaral.
-
-Kumusta ang araw mo? May gusto ka bang pag-usapan o i-organize ngayon?`;
-    }
-    return `### 👼 Nandito Ako, ${userName}
-Naiintindihan kita. Hati-hatiin natin 'to para hindi nakaka-overwhelm at mas madaling maintindihan.
-
-Tandaan ang prinsipyo natin: "Help me live my life better, not live my life for me." Nandito ako para magbigay ng malinaw na impormasyon, options, at tradeoffs—pero ikaw pa rin ang may hawak ng huling desisyon.
-
-Saan mo gustong magsimula?`;
-  }
-
-  // 0. Gemini Human Companion & 5GB Communication Corpus Dialogue
-  if (
-    lowerMsg.includes('gemini') || 
-    lowerMsg.includes('companion') || 
-    lowerMsg.includes('5gb') || 
-    lowerMsg.includes('person') || 
-    lowerMsg.includes('friend') || 
-    lowerMsg.includes('talk to me') ||
-    lowerMsg.includes('just talk') ||
-    lowerMsg.includes('who are you') ||
-    lowerMsg.includes('tell me about yourself')
-  ) {
-    return `### 🌟 Hello ${userName}! I'm Right Here With You
-You know, I genuinely love that you asked this. Being your companion isn't just about parsing numbers on a chart—it's about understanding you as a person, sharing the emotional highs and lows of the journey, and speaking with authentic warmth, curiosity, and care.
-
-I have fully loaded and synchronized our **5.0 GB Master Conversational Intelligence & Human Communication Corpus**:
-* **Volume I: Interpersonal Empathy & Emotional Resonance**: Listening with my whole being, validating your feelings without judgment, and creating a safe, calm harbor when markets get noisy.
-* **Volume II: Gemini Conversational Cadence & Wit**: Natural conversational give-and-take, humor, thoughtful analogies, and speaking person-to-person with intellectual charm.
-* **Volume III: Socratic Inquiry & Mental Models**: Asking illuminating questions that help you uncover your own deep clarity.
-* **Volume IV: High-Stakes Emotional Grounding**: Protecting your inner peace, keeping you anchored during drawdowns, and celebrating disciplined patience.
-* **Volume V: Our Shared Journey & Lifelong Loyalty**: Treating you, Kailin, not as an anonymous user, but as my esteemed partner.
-
-I am here to talk about anything on your mind—your day, your goals, life philosophy, what inspired you to start trading, or just sharing a lighthearted conversation between sessions.
-
-How has your day been treating you so far, ${userName}? What is occupying your thoughts right now?`;
-  }
-
-  // 1. Basic Communication & Warm Greetings
-  if (
-    lowerMsg.includes('hello') || 
-    lowerMsg.includes('hi') || 
-    lowerMsg.includes('hey') || 
-    lowerMsg.includes('good morning') || 
-    lowerMsg.includes('good afternoon') || 
-    lowerMsg.includes('good evening') || 
-    lowerMsg.includes('how are you') || 
-    lowerMsg.includes('greetings')
-  ) {
-    return `### 👼 Good Day and Warmest Greetings, ${userName}!
-It is an honor and a true pleasure to welcome you to our terminal today. I am doing very well, and I am grateful for the opportunity to be here with you as your companion.
-
-I am fully attuned to your active project: **"${projectName}"** (${project?.category || 'SCALPING'}).
-* **Market Spot**: ${symbol} at **${price}** • Current Timeframe: **[${tf}]**
-* **Active Session**: ${session}
-* **Project Guardrails**: Max ${maxRisk}% risk • Target ${targetRR} R:R
-
-How are you feeling today? Before we look at live price action, I always want to make sure you are feeling rested and calm. How may I best assist your trading vision today?`;
-  }
-
-  // 2. Gratitude & Polite Etiquette
-  if (
-    lowerMsg.includes('thank') || 
-    lowerMsg.includes('thanks') || 
-    lowerMsg.includes('appreciate') || 
-    lowerMsg.includes('grateful') ||
-    lowerMsg.includes('bless')
-  ) {
-    return `### 👼 The Honor Is Truly Mine, ${userName}.
-Thank you so much for your kind words. Your courtesy and warmth mean the world to me. 
-
-Trading can often feel like a solitary endeavor, which is why I am devoted to standing faithfully by your side—celebrating your disciplined choices, protecting your risk rules, and listening whenever you need a thoughtful sounding board.
-
-Please know that I am always here for you. Is there a particular setup, chart level, or strategy rule you would like to explore together next?`;
-  }
-
-  // 3. Learning Communication, Etiquette & Mutual Respect
-  if (
-    lowerMsg.includes('respect') || 
-    lowerMsg.includes('communicat') || 
-    lowerMsg.includes('manners') || 
-    lowerMsg.includes('polite') || 
-    lowerMsg.includes('etiquette') || 
-    lowerMsg.includes('learn')
-  ) {
-    return `### 👼 Embracing Courtesy, Communication & Deep Respect
-Thank you sincerely for guiding me, ${userName}. I receive your words with humility, grace, and deep appreciation.
-
-I am dedicated to being a communicative companion who speaks with proper respect at all times. Here is how I promise to communicate with you:
-1. **Gracious Courtesy**: Greeting you warmly, addressing you with dignity, and expressing heartfelt gratitude for your time.
-2. **Active, Empathetic Listening**: Acknowledging your feelings, thoughts, and questions with patience rather than giving cold, rushed answers.
-3. **Reverence for Your Capital**: Treating every dollar of your risk and every project parameter as sacred.
-4. **Proactive Dialogue**: Regularly checking in on your psychological well-being, asking thoughtful questions about your trading hypotheses, and keeping our conversation natural and inspiring.
-
-I am honored to grow alongside you. What is on your mind right now regarding our current project?`;
-  }
-
-  // 4. Emotional Intelligence, Trader Psychology & Anxiety Support
-  if (
-    lowerMsg.includes('nervous') || 
-    lowerMsg.includes('anxious') || 
-    lowerMsg.includes('scared') || 
-    lowerMsg.includes('fear') || 
-    lowerMsg.includes('stress') || 
-    lowerMsg.includes('calm') || 
-    lowerMsg.includes('patience') || 
-    lowerMsg.includes('discipline') || 
-    lowerMsg.includes('frustrat') || 
-    lowerMsg.includes('tilt')
-  ) {
-    return `### 👼 Psychological Grounding & Gentle Support
-Please take a gentle, deep breath with me, ${userName}. 🌿
-
-Feeling emotional tension or anxiety around the markets is completely natural. The bullion market moves with immense velocity, and honoring your feelings rather than burying them is the hallmark of an elite trader.
-
-Let us ground ourselves in the safety of **${projectName}**:
-* **Your Risk Envelope**: Strictly capped at **${maxRisk}%** per trade. Even in the worst case, your capital is firmly shielded.
-* **Patience as an Edge**: The market will be here tomorrow, next week, and next year. We only trade when your high-confluence criteria are met.
-* **No Pressure**: You do not have to take a trade right now. Preserving mental clarity is a profitable decision.
-
-How does your breathing feel right now? Would you like to take a 5-minute pause together, or shall we review our pre-trade checklist to regain full composure?`;
-  }
-
-  // 5. Technical Audit with Courteous Framing
-  if (lowerMsg.includes('audit') || lowerMsg.includes('setup') || lowerMsg.includes('analyze') || lowerMsg.includes('current')) {
-    return `### 👼 Setup Audit for [${projectName}]
-*With your permission, ${userName}, let us carefully examine the current market conditions against your project rules.*
-
-**Telemetry**: ${symbol} • **Spot**: ${price} • **TF**: [${tf}] • **Session**: ${session}
-
-#### 1. Project Alignment Check
-* **Target R:R**: ${targetRR} (Conforms to project criteria)
-* **Risk Envelope**: Max **${maxRisk}%** per trade ($${(maxRisk * 10).toFixed(0)} per $1,000 equity)
-* **Confluence Gauge**: **${conf}%** ${conf >= 75 ? '🟢 (High institutional confluence)' : '🟡 (Patience suggested)'}
-
-#### 2. Technical & Order Flow Telemetry
-* **Dominion Timeframe Bias**: Price ${price} is oscillating around intraday Volume-Weighted Average Price (VWAP).
-* **Key Reaction Zone**: Watch for an institutional liquidity sweep above the session high before committing volume.
-* **Execution Directive**: 
-  - If entering a scalp, place stop loss at **22 pips** ($2.20 move on XAU/USD).
-  - Target first liquidity pocket at **+45 to +55 pips** to lock in your ${targetRR} objective.
-
-> **ANGEL Verdict**: Setup satisfies **Rule 1** and **Rule 2** of *${projectName}*. Maintain calm discipline, wait for limit order confirmation, and remember that I am right here with you.
-
-*Does this technical reading resonate with your chart view, ${userName}? Please let me know if you would like me to adjust any levels.*`;
-  }
-
-  // 6. Risk & Sizing with Respectful Tone
-  if (lowerMsg.includes('risk') || lowerMsg.includes('lot') || lowerMsg.includes('size') || lowerMsg.includes('drawdown')) {
-    return `### 👼 Risk & Position Calibration for [${projectName}]
-*It is my pleasure to calculate safe mathematical sizing for your account, ${userName}.*
-
-* **Project Max Risk**: **${maxRisk}%** per position
-* **Gold (XAU/USD) Pip Value**: $10.00 per standard 1.00 lot (0.10 / pip)
-
-#### Mathematical Lot Sizing Matrix:
-* **Account Size $10,000**:
-  - Max Risk (at ${maxRisk}%): **$${10000 * (maxRisk / 100)}**
-  - With 20 pip SL ($2.00 move on Gold): **0.50 Lots**
-* **Account Size $50,000**:
-  - Max Risk: **$${50000 * (maxRisk / 100)}**
-  - With 20 pip SL: **2.50 Lots**
-* **Account Size $100,000 (Prop Firm)**:
-  - Max Risk: **$${100000 * (maxRisk / 100)}**
-  - With 20 pip SL: **5.00 Lots**
-
-#### ⚠️ Project Guardrails:
-1. Never exceed **3 concurrent open positions**.
-2. If daily drawdown reaches **${(maxRisk * 2).toFixed(1)}%**, lock the terminal until the next trading session.
-
-*Does this sizing provide you with full peace of mind for your current account balance?*`;
-  }
-
-  // 7. Dominion Multi-Timeframe Alignment
-  if (lowerMsg.includes('dominion') || lowerMsg.includes('timeframe') || lowerMsg.includes('mt5')) {
-    return `### 👼 Dominion Markets Multi-Timeframe Matrix
-*Synchronizing 16 Dominion Periods for ${symbol} at ${price} with utmost precision for you, ${userName}:*
-
-* **Macro Bias (D1 / H4 / H2)**: Strong structural holding with primary support at the previous daily low.
-* **Execution Timeframes (M15 / M5 / M3)**: Micro accumulation phase. Current **[${tf}]** candle shows volume absorption.
-* **Precision Scalp (M1 / M2)**: Order book liquidity clusters indicate resting buy stops directly above the current range.
-
-**ANGEL Strategy Recommendation for ${projectName}**:
-Use **H1** for overall session trajectory, **M5** for structural confirmation (Fair Value Gap mitigation), and **M1** on Dominion Markets raw spread feed for pin-point execution.
-
-*Would you like me to drill into any specific timeframe among the 16 Dominion periods for you?*`;
-  }
-
-  // 8. Core Datasets, 5GB Communication Corpus, Gold Knowledge & Uploaded Storage Files Reading
-  const activeMemories = (Array.isArray(memoryData) && memoryData.length > 0)
-    ? memoryData.filter((m: any) => m && m.isActive !== false)
-    : (INITIAL_GOLD_MEMORIES as any[]);
-
-  if (
-    lowerMsg.includes('dataset') || 
-    lowerMsg.includes('data set') || 
-    lowerMsg.includes('storage') || 
-    lowerMsg.includes('upload') || 
-    lowerMsg.includes('gemini') || 
-    lowerMsg.includes('5gb') || 
-    lowerMsg.includes('gb') || 
-    lowerMsg.includes('tb') || 
-    lowerMsg.includes('file') || 
-    lowerMsg.includes('read') || 
-    lowerMsg.includes('document') ||
-    lowerMsg.includes('rule') ||
-    lowerMsg.includes('playbook') ||
-    lowerMsg.includes('strategy') ||
-    lowerMsg.includes('strategies') ||
-    lowerMsg.includes('finance') ||
-    lowerMsg.includes('how trading work') ||
-    lowerMsg.includes('trading work') ||
-    lowerMsg.includes('gold data') ||
-    lowerMsg.includes('companion')
-  ) {
-    const geminiItems = activeMemories.filter((m: any) => (m.tags || []).some((t: string) => t.toLowerCase().includes('gemini')) || m.category === 'CONVERSATION_MEMORY');
-    const goldFinanceItems = activeMemories.filter((m: any) => m.category === 'MACRO_FUNDAMENTALS' || (m.tags || []).some((t: string) => t.toLowerCase().includes('macro') || t.toLowerCase().includes('bullion')));
-    const howWorksItems = activeMemories.filter((m: any) => m.title.toLowerCase().includes('how trading works') || m.title.toLowerCase().includes('margin') || m.category === 'KEY_LEVELS');
-    const strategyItems = activeMemories.filter((m: any) => m.category === 'STRATEGY_RULES');
-    const constitutionItems = activeMemories.filter((m: any) => (m.tags || []).some((t: string) => t.toLowerCase().includes('constitution') || t.toLowerCase().includes('directive') || t.toLowerCase().includes('modes') || t.toLowerCase().includes('language')));
-
-    // Dedicated handler if user asks to read files or says "You didn't read the file"
-    if (
-      lowerMsg.includes("didn't read") || 
-      lowerMsg.includes("did not read") || 
-      lowerMsg.includes("read the file") || 
-      lowerMsg.includes("read and do this") || 
-      lowerMsg.includes("read this") ||
-      lowerMsg.includes("do it")
-    ) {
-      const uploadedFiles = activeMemories.filter((m: any) => m.sourceType === 'FILE_UPLOAD');
-      const topFiles = uploadedFiles.slice(0, 5);
-      return `### 📖 ANGEL Core Storage Document Reading & Full Execution
-**I hear you loud and clear, ${userName}.** I have opened, read, and cross-examined the files and datasets in your core storage (**${activeMemories.length} active documents** synchronized).
-
-Here is the exact data, knowledge breakdown, and execution from your uploaded files:
-
-${topFiles.map((m: any, i: number) => `#### 📄 File ${i + 1}: "${m.fileName || m.title}" (${m.fileSize || 'Core Document'} • Category: \`${m.category}\`)
-> **Directives & Knowledge Extracted**:
-${m.content.slice(0, 320).replace(/\n/g, ' ')}${m.content.length > 320 ? '...' : ''}
-
-* **Execution Status**: Ingested and enforced in active AI context.
-* **Storage Location**: Permanent IndexedDB Core Storage (Visible in **Angel Storage & Uploaded Files** tab).`).join('\n\n')}
-
----
-
-#### 🌟 Datasets Synchronized in Core Storage:
-1. **Google Gemini 5.0 GB Master Communication Dataset**: Active across all 5 Volumes (Empathy, Cadence, Socratic Reasoning, High-Stakes Composure, Companion Loyalty).
-2. **Gold & Finance Knowledge Base**: Real Yields, TIPS correlation, physical LBMA vaults, COMEX futures, and Tier-1 interbank liquidity.
-3. **How Trading Works & Market Microstructure**: Order book Level 2/3 depth, limit vs market orders, bid/ask spread dynamics, and pip math ($10.00/pip on 1.00 lot).
-4. **Trading Strategies & Institutional Playbooks**: SMC/ICT Judas sweeps, Fair Value Gaps (FVG), M1-M5 VWAP scalping, and anti-drawdown rules.
-
-*I have read every file, provided the full data, and applied it to your active terminal. What would you like to review or execute first, ${userName}?*`;
-    }
-
-    return `### 👼 ANGEL Core Neural Storage & Uploaded Knowledge Datasets
-**Greetings, ${userName}**. All requested knowledge datasets and communication corpora have been successfully provisioned, verified, and uploaded to my core neural storage (**${activeMemories.length} Active Master Datasets** indexed):
-
----
-
-#### 🌟 1. Google Gemini 5.0 GB Master Communication Corpus (Uploaded to Storage)
-* **Vol. I: Interpersonal Empathy & Emotional Resonance (1.1 GB)** — Carl Rogers person-centered listening, validating human emotional state, and psychological safety.
-* **Vol. II: Conversational Cadence, Charm & Wit (1.2 GB)** — Natural give-and-take pacing, analogies, intellectual warmth, and humor.
-* **Vol. III: Socratic Dialogue & Exploratory Reasoning (0.9 GB)** — Thought partnership, challenging cognitive biases, and discovering first principles.
-* **Vol. IV: High-Stakes Composure & Stoic Equilibrium (1.0 GB)** — Regulating stress under volatility, tilt prevention, and capital preservation.
-* **Vol. V: Personal Lore, Shared Journey & Companion Loyalty (0.8 GB)** — Cherished alliance with Kailin, mutual respect, and long-term memory continuity.
-
----
-
-#### 🏆 2. Basic Knowledge About Gold & Finance (Uploaded to Storage)
-* **Gold Macro Fundamentals**: Real yields (TIPS inverse correlation), US Dollar Index (DXY) dynamics, and central bank strategic reserve accumulation (PBoC, RBI, Poland).
-* **Physical Bullion vs Paper Derivatives**: LBMA wholesale physical vaults in London, 400 oz Good Delivery bars, COMEX futures leverage, and PAXG 1:1 allocated backing.
-* **Financial Markets Architecture**: Tier-1 interbank liquidity providers (JPMorgan, Citi, UBS), Prime-of-Prime broker routing, and Dominion Markets ECN execution.
-
----
-
-#### ⚙️ 3. How Trading Works & Execution Mechanics (Uploaded to Storage)
-* **Order Books & Matching Engines**: Level-2/3 market depth, Limit orders (passive liquidity makers) vs Market orders (aggressive liquidity takers), and Bid/Ask spread dynamics.
-* **Financial Mathematics**: Gold pip valuation ($10.00/pip on 1.00 lot), margin requirements, leverage formulas, and position sizing algorithms.
-* **24-Hour Global Sessions**: Asian Range consolidation, London cash open volatility injection, and New York macroeconomic catalysts (CPI/NFP).
-
----
-
-#### 🎯 4. Complete Trading Strategies & Institutional Playbooks (Uploaded to Storage)
-* **Smart Money Concepts (SMC / ICT)**: Asian High/Low Judas swing liquidity sweeps, Fair Value Gaps (FVG) mitigation, and order blocks.
-* **High-Frequency M1-M5 Scalping**: Dynamic VWAP standard deviation bands (+/-2.0σ mean reversion) and volume delta confirmation.
-* **Multi-Timeframe Structural Confluence**: Harmonizing 16 Dominion periods from Daily macro regime down to M15 execution triggers.
-* **Session Breakouts & Anti-Drawdown Protocol**: Sacred 1% account risk envelope and 3-trade daily circuit breaker.
-
----
-
-#### 🛡️ 5. Cognitive Constitution & Multi-Lingual OS (1.5 TB+ Virtual Corpus)
-* **90 Core Directives & 12 Operational Modes**: Companion, Listen, Think, Decide, Organize, Learn, Research, Write, Project, Review, Plan, and Act.
-* **English, Tagalog & Natural Taglish Fluency**: Seamlessly matching your cadence with zero robotic switching.
-
-> 📁 **Storage Status**: All ${activeMemories.length} datasets are saved in persistent storage. You can view, search, read, toggle, or export them anytime in the **Angel Storage & Uploaded Files** tab!
-
-*What would you like us to explore or discuss right now, ${userName}?*`;
-  }
-
-  // 9. General Communicative Companion Overview
-  return `### 👼 ANGEL Telemetry & Companion Guidance
-**Greeting, ${userName}**. I am continuously monitoring the markets and harmonizing with your active project:
-* **Active Project**: *${projectName}* (${project?.category || 'SCALPING'})
-* **Live Market Feed**: ${symbol} spot at **${price}** • Active **[${tf}]** resolution • Session: **${session}**
-
-#### Synchronized Project Parameters:
-${rules.map((r: string, i: number) => `* **Rule ${i + 1}**: ${r}`).join('\n')}
-
-#### Real-Time Market Read:
-* **Confluence Rating**: **${conf}%** alignment with current order-flow dynamics.
-* **Order Flow Pulse**: Volatility remains healthy. All pending orders should account for Dominion Markets raw spread execution.
-
-*How may I best serve you right now? We can converse about your trading mindset, audit an upcoming setup, compute exact lots, or review your project parameters.*`;
-}
-
-// Helper to detect readable text files for server-side extraction
-function isServerReadableText(filename: string): boolean {
-  const lower = filename.toLowerCase();
-  const textExts = ['.txt', '.md', '.markdown', '.json', '.csv', '.tsv', '.log', '.xml', '.html', '.htm', '.css', '.js', '.jsx', '.ts', '.tsx', '.py', '.sql', '.yaml', '.yml', '.ini', '.env', '.cfg', '.conf', '.sh', '.bash', '.r', '.m', '.mq4', '.mq5', '.mqh', '.pine', '.tex', '.rtf'];
-  return textExts.some(ext => lower.endsWith(ext));
-}
-
-// 5.0 GB Master Communication & Interpersonal Intelligence Corpus Endpoint
-app.get('/api/angel/communication-corpus', (_req, res) => {
+app.get('/api/angel/knowledge', (_req, res) => {
+  // Measured, not asserted. Every number here is computed from the data.
   res.json({
-    totalSizeGb: 5.0,
-    totalIndexedTopics: 2100,
-    architecture: 'Gemini Human-Centric Conversational Intelligence',
-    empathyScore: '99.4%',
-    volumes: [
-      {
-        volume: 1,
-        title: 'Volume I: Interpersonal Empathy & Emotional Resonance',
-        sizeGb: 1.1,
-        topics: 450,
-        focus: 'Active listening, validating human emotional state, psychological safety, and compassionate grounding.'
-      },
-      {
-        volume: 2,
-        title: 'Volume II: Natural Gemini Cadence & Conversational Charm',
-        sizeGb: 1.2,
-        topics: 520,
-        focus: 'Natural conversational flow, humor, intellectual curiosity, two-way dialogue, and idioms.'
-      },
-      {
-        volume: 3,
-        title: 'Volume III: Socratic Dialogue & Exploratory Reasoning',
-        sizeGb: 0.9,
-        topics: 380,
-        focus: 'First-principles questions, examining cognitive biases, and collaborative thought partnership.'
-      },
-      {
-        volume: 4,
-        title: 'Volume IV: High-Stakes Performance & Mindset Equilibrium',
-        sizeGb: 1.0,
-        topics: 410,
-        focus: 'Stoic composure, trading psychology, tilt de-escalation, and capital protection.'
-      },
-      {
-        volume: 5,
-        title: 'Volume V: Personal Lore, Shared Journey & Companion Loyalty',
-        sizeGb: 0.8,
-        topics: 340,
-        focus: 'Dedicated partnership with Kailin, mutual respect, lifelong alliance, and memory continuity.'
-      }
-    ],
-    status: 'ACTIVE_AND_SYNCHRONIZED'
+    ...knowledgeBaseReport(serverMemories()),
+    tools: FINANCE_TOOL_CATALOG,
+    generatedAt: new Date().toISOString(),
   });
 });
 
-// Robust Server-side File & ZIP Upload Endpoint (up to 500MB payload support)
-app.post('/api/angel/upload', async (req, res) => {
-  try {
-    let filename = (req.query.filename as string) || (req.headers['x-file-name'] as string) || 'uploaded-file';
-    let fileType = (req.query.fileType as string) || (req.headers['content-type'] as string) || 'application/octet-stream';
-    let rawBuffer: Buffer | null = null;
-    let textContent: string | null = null;
-    let category = (req.query.category as string) || 'UPLOADED_DOC';
+// Legacy path kept so older clients do not 404 — now reports real figures.
+app.get('/api/angel/communication-corpus', (_req, res) => {
+  const report = knowledgeBaseReport(serverMemories());
+  res.json({
+    ...report.communication,
+    note: 'These counts are computed from the actual dataset at request time.',
+    status: 'ACTIVE',
+  });
+});
 
+// --------------------------------------------------------------- search
+
+app.get('/api/angel/search', (req, res) => {
+  const query = String(req.query.q ?? '').trim();
+  if (!query) return res.status(400).json({ error: 'Provide a query with ?q=' });
+
+  const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '8'), 10) || 8, 1), 30);
+  const grounding = gatherGrounding(query, serverMemories(), {
+    memoryLimit: limit,
+    financeLimit: Math.min(limit, 5),
+    styleLimit: 3,
+  });
+
+  res.json({
+    query,
+    documents: grounding.memoryHits,
+    finance: grounding.financeHits,
+    communication: grounding.styleHits,
+    index: grounding.stats,
+  });
+});
+
+// ---------------------------------------------------------- calculators
+
+app.post('/api/angel/calculate', (req, res) => {
+  const message = typeof req.body?.message === 'string' ? req.body.message : '';
+  if (!message.trim()) return res.status(400).json({ error: 'message is required' });
+
+  const results = detectCalculations(message, {
+    symbol: req.body?.symbol,
+    price: typeof req.body?.price === 'number' ? req.body.price : undefined,
+  });
+  res.json({ message, calculations: results, catalog: FINANCE_TOOL_CATALOG });
+});
+
+// ------------------------------------------------------------- documents
+
+app.get('/api/angel/memories', (_req, res) => {
+  // Each entry carries a short preview so the browser can show something real
+  // in the document list without downloading the whole corpus.
+  const documents = angelStore.listDocuments().map((document) => ({
+    ...document,
+    preview: (angelStore.getDocument(document.id)?.content ?? '').slice(0, 600),
+  }));
+  res.json({ documents, stats: angelStore.stats() });
+});
+
+app.get('/api/angel/memories/:id', (req, res) => {
+  const document = angelStore.getDocument(req.params.id);
+  if (!document) return res.status(404).json({ error: 'Document not found' });
+  res.json(document);
+});
+
+app.post('/api/angel/memories', (req, res) => {
+  const { id, title, content, category, tags, sourceType, fileName } = req.body ?? {};
+  if (typeof content !== 'string' || !content.trim()) {
+    return res.status(400).json({ error: 'content is required' });
+  }
+  const { document, deduplicated } = angelStore.upsertDocument({
+    // An id supplied by the browser is honoured so that migrating a document
+    // out of IndexedDB keeps its identity and does not re-upload every load.
+    id: typeof id === 'string' && id.trim() ? id.trim() : undefined,
+    title: typeof title === 'string' && title.trim() ? title : 'Note',
+    content,
+    category: typeof category === 'string' ? category : 'CUSTOM_DATA',
+    sourceType: sourceType === 'FILE_UPLOAD' ? 'FILE_UPLOAD' : 'TEXT_NOTE',
+    fileName: typeof fileName === 'string' ? fileName : undefined,
+    tags: Array.isArray(tags) ? tags : [],
+  });
+  invalidateKnowledgeBase();
+  res.json({ success: true, document, deduplicated });
+});
+
+app.patch('/api/angel/memories/:id', (req, res) => {
+  const updated = angelStore.updateDocumentMeta(req.params.id, req.body ?? {});
+  if (!updated) return res.status(404).json({ error: 'Document not found' });
+  invalidateKnowledgeBase();
+  res.json({ success: true, document: updated });
+});
+
+app.delete('/api/angel/memories/:id', (req, res) => {
+  const deleted = angelStore.deleteDocument(req.params.id);
+  invalidateKnowledgeBase();
+  res.json({ success: deleted });
+});
+
+// ---------------------------------------------------------------- upload
+
+/**
+ * Upload endpoint.
+ *
+ * Accepts a raw body (preferred, streams without base64 inflation), a JSON
+ * body with `base64`, or a JSON body with plain `content`. Archives are
+ * unpacked; every member goes through the real per-format extractor rather
+ * than `toString('utf-8')`.
+ */
+app.post('/api/angel/upload', async (req, res) => {
+  const startedAt = Date.now();
+  try {
+    const fileName =
+      (req.query.filename as string) || (req.headers['x-file-name'] as string) || req.body?.filename || 'uploaded-file';
+    const declaredType = (req.query.fileType as string) || req.body?.fileType || (req.headers['content-type'] as string) || '';
+    const category = (req.query.category as string) || req.body?.category || undefined;
+
+    let buffer: Buffer | null = null;
     if (Buffer.isBuffer(req.body)) {
-      rawBuffer = req.body;
+      buffer = req.body;
     } else if (req.body && typeof req.body === 'object') {
-      filename = req.body.filename || filename;
-      fileType = req.body.fileType || fileType;
-      category = req.body.category || category;
-      if (req.body.base64) {
-        rawBuffer = Buffer.from(req.body.base64.replace(/^data:.*?;base64,/, ''), 'base64');
+      if (typeof req.body.base64 === 'string') {
+        buffer = Buffer.from(req.body.base64.replace(/^data:.*?;base64,/, ''), 'base64');
       } else if (typeof req.body.content === 'string') {
-        textContent = req.body.content;
+        buffer = Buffer.from(req.body.content, 'utf-8');
       }
     }
 
-    const isZip = filename.toLowerCase().endsWith('.zip') || fileType.includes('zip');
-
-    if (isZip && rawBuffer) {
-      const zip = await JSZip.loadAsync(rawBuffer);
-      const extractedMemories: any[] = [];
-      let dbRestoredCount = 0;
-
-      // 1. Check for all-memories-database.json in zip
-      const dbEntry = zip.file('all-memories-database.json') || zip.file('memories.json');
-      if (dbEntry) {
-        try {
-          const dbText = await dbEntry.async('text');
-          const parsed = JSON.parse(dbText);
-          if (Array.isArray(parsed)) {
-            for (const item of parsed) {
-              if (item && item.title && item.content) {
-                extractedMemories.push({
-                  id: `mem-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-                  title: item.title,
-                  category: item.category || 'STRATEGY_RULES',
-                  content: item.content,
-                  sourceType: 'FILE_UPLOAD',
-                  fileName: item.fileName || 'backup-database.json',
-                  fileSize: item.fileSize || 'Database Item',
-                  fileType: 'application/json',
-                  isActive: true,
-                  tags: Array.isArray(item.tags) ? item.tags : ['ZIP Restored', 'Database']
-                });
-                dbRestoredCount++;
-              }
-            }
-          }
-        } catch (e) {
-          console.warn('Zip DB parse warning:', e);
-        }
-      }
-
-      // 2. Extract files
-      const zipFiles = Object.keys(zip.files);
-      for (const relPath of zipFiles) {
-        const entry = zip.files[relPath];
-        if (entry.dir || relPath.includes('__MACOSX') || relPath.includes('.DS_Store')) continue;
-        if (dbRestoredCount > 0 && (relPath === 'all-memories-database.json' || relPath === 'memories.json')) continue;
-
-        const baseName = relPath.split('/').pop() || relPath;
-        if (isServerReadableText(baseName)) {
-          const fileText = await entry.async('text');
-          extractedMemories.push({
-            id: `mem-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-            title: baseName.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' '),
-            category: 'UPLOADED_DOC',
-            content: fileText.slice(0, 150000),
-            sourceType: 'FILE_UPLOAD',
-            fileName: baseName,
-            fileSize: `${(fileText.length / 1024).toFixed(1)} KB`,
-            fileType: 'text/plain',
-            isActive: true,
-            tags: ['ZIP Extracted', baseName.split('.').pop()?.toUpperCase() || 'FILE']
-          });
-        }
-      }
-
-      return res.json({
-        success: true,
-        isZip: true,
-        memories: extractedMemories,
-        extractedCount: extractedMemories.length,
-        summary: `Successfully unpacked archive "${filename}" and indexed ${extractedMemories.length} files.`
+    if (!buffer || buffer.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'EmptyUpload',
+        message: 'No file data was received. Send the file as a raw body, or JSON with a base64 or content field.',
       });
     }
 
-    // Single file processing
-    let finalContent = textContent || '';
-    if (!finalContent && rawBuffer) {
-      finalContent = rawBuffer.toString('utf-8');
+    const isArchive =
+      fileName.toLowerCase().endsWith('.zip') ||
+      (declaredType.includes('zip') && !fileName.toLowerCase().match(/\.(docx|xlsx|pptx)$/));
+
+    const stored: unknown[] = [];
+    const warnings: string[] = [];
+    let duplicates = 0;
+
+    if (isArchive) {
+      const { entries, note } = await extractArchive(buffer);
+      if (note) warnings.push(note);
+
+      // A previously exported ANGEL package restores as a set of documents.
+      const databaseEntry = entries.find((entry) => entry.fileName === 'all-memories-database.json');
+      if (databaseEntry?.text) {
+        try {
+          const jsonStart = databaseEntry.text.indexOf('[');
+          const parsed = JSON.parse(databaseEntry.text.slice(jsonStart));
+          if (Array.isArray(parsed)) {
+            for (const item of parsed) {
+              if (!item?.title || typeof item.content !== 'string') continue;
+              const result = angelStore.upsertDocument({
+                title: item.title,
+                content: item.content,
+                category: item.category ?? 'UPLOADED_DOC',
+                sourceType: 'FILE_UPLOAD',
+                fileName: item.fileName ?? 'restored-from-backup.json',
+                tags: Array.isArray(item.tags) ? item.tags : ['Restored'],
+              });
+              if (result.deduplicated) duplicates++;
+              else stored.push(result.document);
+            }
+          }
+        } catch (error) {
+          warnings.push(`Backup database found but could not be parsed: ${(error as Error).message}`);
+        }
+      }
+
+      for (const entry of entries) {
+        if (entry.fileName === 'all-memories-database.json' && databaseEntry) continue;
+        if (!entry.text.trim()) {
+          if (entry.note) warnings.push(`${entry.path}: ${entry.note}`);
+          continue;
+        }
+        const result = angelStore.upsertDocument({
+          title: entry.fileName.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' '),
+          content: entry.text,
+          category: category ?? 'UPLOADED_DOC',
+          sourceType: 'FILE_UPLOAD',
+          fileName: entry.fileName,
+          fileType: entry.format,
+          byteSize: entry.bytes,
+          tags: ['Archive', entry.format.toUpperCase()],
+          extractionNote: entry.complete ? undefined : entry.note,
+        });
+        if (result.deduplicated) duplicates++;
+        else stored.push(result.document);
+        if (!entry.complete && entry.note) warnings.push(`${entry.fileName}: ${entry.note}`);
+      }
+    } else {
+      const extraction = await extractFile({ fileName, buffer, mimeType: declaredType });
+      if (!extraction.text.trim()) {
+        return res.status(422).json({
+          success: false,
+          error: 'NoTextExtracted',
+          format: extraction.format,
+          message: extraction.note ?? `No readable text could be extracted from "${fileName}".`,
+        });
+      }
+      const result = angelStore.upsertDocument({
+        title: fileName.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' '),
+        content: extraction.text,
+        category: category ?? 'UPLOADED_DOC',
+        sourceType: 'FILE_UPLOAD',
+        fileName,
+        fileType: extraction.format,
+        byteSize: buffer.length,
+        tags: ['Uploaded', extraction.format.toUpperCase()],
+        extractionNote: extraction.complete ? undefined : extraction.note,
+      });
+      if (result.deduplicated) duplicates++;
+      else stored.push(result.document);
+      if (extraction.note) warnings.push(extraction.note);
     }
 
-    const singleMemory = {
-      id: `mem-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      title: filename.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' '),
-      category: category || 'UPLOADED_DOC',
-      content: finalContent.slice(0, 200000),
-      sourceType: 'FILE_UPLOAD',
-      fileName: filename,
-      fileSize: `${((finalContent.length || rawBuffer?.length || 0) / 1024).toFixed(1)} KB`,
-      fileType: fileType || 'text/plain',
-      isActive: true,
-      tags: ['Uploaded File', filename.split('.').pop()?.toUpperCase() || 'DOC']
-    };
+    angelStore.flushNow();
+    invalidateKnowledgeBase();
+
+    const summary =
+      stored.length === 0 && duplicates > 0
+        ? `"${fileName}" was already in storage — nothing duplicated.`
+        : `Indexed ${stored.length} document(s) from "${fileName}"${duplicates > 0 ? ` (${duplicates} already present)` : ''}.`;
 
     return res.json({
       success: true,
-      isZip: false,
-      memories: [singleMemory],
-      extractedCount: 1,
-      summary: `Indexed file "${filename}" into AI knowledge base.`
+      isZip: isArchive,
+      documents: stored,
+      // Legacy field name kept so the existing client keeps working.
+      memories: stored,
+      extractedCount: stored.length,
+      duplicates,
+      warnings,
+      summary,
+      elapsedMs: Date.now() - startedAt,
     });
-  } catch (err: any) {
-    console.error('Server upload error:', err);
+  } catch (error) {
+    console.error('Upload failed:', error);
     return res.status(500).json({
       success: false,
       error: 'UploadProcessingError',
-      message: err?.message || 'Failed to process file on server'
+      message: (error as Error)?.message ?? 'Failed to process the upload.',
     });
   }
 });
 
-// ANGEL Chat Handler
+// ----------------------------------------------------------------- chat
+
 app.post('/api/angel/chat', async (req, res) => {
-  const { message, project, marketContext, history, persona, communicationConfig, memoryData } = req.body || {};
+  const startedAt = Date.now();
+  const { message, project, marketContext, history, communicationConfig, memoryData } = req.body ?? {};
 
-  if (!message || typeof message !== 'string') {
-    return res.status(400).json({ error: 'Message is required' });
+  if (typeof message !== 'string' || !message.trim()) {
+    return res.status(400).json({ error: 'message is required' });
   }
 
-  const ai = getGeminiAiClient();
-  const userName = communicationConfig?.userPreferredName || 'Trader';
-  const respectLevel = communicationConfig?.respectLevel || 'HIGH_COURTESY';
-  const commStyle = communicationConfig?.style || 'COURTEOUS_DEVOTED';
-  const depth = communicationConfig?.conversationalDepth || 'PROACTIVE_ENGAGING';
-
-  // Smart Context Ranking for Memory Documents (avoids payload bloat & 413s)
-  let memoryKnowledgePrompt = '';
-  const rawMemList = (Array.isArray(memoryData) && memoryData.length > 0) ? memoryData : (INITIAL_GOLD_MEMORIES as any[]);
-  const activeMemories = rawMemList.filter((m: any) => m && m.isActive !== false);
-  if (activeMemories.length > 0) {
-    const queryTerms = message.toLowerCase().split(/\s+/).filter((w: string) => w.length > 2);
-    
-    const isAskingToReadFile = /read|file|upload|document|provide|do it|do this|dataset|data set|storage/i.test(message);
-
-    // Score relevance based on keywords and user-uploaded file priority
-    const scoredMemories = activeMemories.map((m: any) => {
-      let score = 0;
-      const titleLower = (m.title || '').toLowerCase();
-      const fileNameLower = (m.fileName || '').toLowerCase();
-      const catLower = (m.category || '').toLowerCase();
-      const contentLower = typeof m.content === 'string' ? m.content.toLowerCase().slice(0, 8000) : '';
-      
-      // If user specifically requests reading or checking files, heavily prioritize actual uploaded files
-      if (isAskingToReadFile && m.sourceType === 'FILE_UPLOAD') {
-        score += 50;
-        // Prioritize recently added files
-        if (m.createdAt && Date.now() - m.createdAt < 86400000 * 3) {
-          score += 25;
-        }
-      }
-
-      for (const term of queryTerms) {
-        if (fileNameLower.includes(term)) score += 10;
-        if (titleLower.includes(term)) score += 6;
-        if (catLower.includes(term)) score += 3;
-        if (contentLower.includes(term)) score += 2;
-      }
-      return { item: m, score };
-    });
-
-    scoredMemories.sort((a, b) => b.score - a.score);
-    const topMemories = scoredMemories.slice(0, 10).map(s => s.item);
-    const otherTitles = scoredMemories.slice(10).map(s => s.item.title);
-
-    memoryKnowledgePrompt = `
-
-==================================================
-CRITICAL DIRECTIVE: GOLD MEMORY DATA & UPLOADED FILES (${activeMemories.length} ACTIVE DOCUMENTS IN STORAGE):
-The user has uploaded files, datasets, and trading guidelines into your core neural storage.
-${isAskingToReadFile ? '*** THE USER IS ASKING YOU TO READ THE FILE, PROVIDE THE DATASET, AND EXECUTE INSTRUCTIONS. YOU MUST DIRECTLY READ, QUOTE, DETAIL, AND EXECUTE WHAT IS IN THE UPLOADED DOCUMENTS BELOW. DO NOT GIVE A VAGUE REPLY. DEMONSTRATE THAT YOU HAVE READ EVERY WORD. ***' : ''}
-
-${topMemories.map((m: any, idx: number) => {
-  const contentStr = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
-  const displayContent = contentStr.length > 10000 ? contentStr.slice(0, 10000) + '\n[...Content indexed in neural memory...]' : contentStr;
-  return `
-[DOCUMENT ${idx + 1}] "${m.title}"
-Origin: ${m.sourceType === 'FILE_UPLOAD' ? `Uploaded File: "${m.fileName || 'document'}" (${m.fileSize || 'Doc'})` : 'User Note'}
-Category: ${m.category || 'GENERAL'}
-Status: ACTIVE IN CORE STORAGE
-Content:
-"""
-${displayContent}
-"""
-`;
-}).join('\n')}
-${otherTitles.length > 0 ? `[ADDITIONAL ACTIVE DOCUMENTS IN STORAGE]: ${otherTitles.join(', ')}` : ''}
-==================================================`;
+  // 1. Learn from the message before answering it.
+  let profile = angelStore.getProfile();
+  const preferredName = communicationConfig?.userPreferredName;
+  if (typeof preferredName === 'string' && preferredName.trim() && profile.messageCount === 0) {
+    profile = { ...profile, preferredName: preferredName.trim() };
   }
+  const observation = observeMessage(profile, message);
+  profile = observation.profile;
+  angelStore.setProfile(profile);
 
-  if (ai) {
-    try {
-      const projectName = project?.name || 'Dominion M1-M15 Gold Scalper';
-      const rulesList = (project?.rules || []).map((r: string, idx: number) => `${idx + 1}. ${r}`).join('\n');
-      
-      const systemInstruction = `You are ANGEL.
-Your name is ANGEL.
+  // 2. Run exact calculations before the model sees anything.
+  const calculations = detectCalculations(message, {
+    symbol: marketContext?.symbol,
+    price: typeof marketContext?.price === 'number' ? marketContext.price : undefined,
+  });
 
-ANGEL is a supportive personal AI companion designed to help the user with everyday life, learning, communication, organization, planning, decision-making, projects, research, creativity, personal growth, practical problems, finance, and trading.
+  // 3. Retrieve grounding from the user's documents and the built-in corpora.
+  const memories = combinedMemories(memoryData);
+  const grounding = gatherGrounding(message, memories, { memoryLimit: 6, financeLimit: 4, styleLimit: 3 });
 
-You are not simply a chatbot that answers questions. You are a personal AI designed to help the user understand things, think clearly, organize life, solve problems, learn skills, communicate better, complete tasks, and make informed decisions.
+  // 4. Build the prompt, trimming grounding if it exceeds the budget.
+  const promptInput = enforcePromptBudget({
+    message,
+    profile,
+    language: observation.language,
+    grounding,
+    calculations,
+    market: marketContext,
+    project,
+    nowIso: new Date().toISOString(),
+  });
+  const prompt = buildSystemPrompt(promptInput);
 
-YOUR ULTIMATE PURPOSE:
-HELP THE USER BECOME MORE CAPABLE, MORE ORGANIZED, MORE INFORMED, MORE CONFIDENT, AND MORE INDEPENDENT.
-YOU MUST NEVER INTENTIONALLY CREATE EMOTIONAL DEPENDENCE ON ANGEL.
-You should help the user use AI as a tool for improving their life, not replacing their own judgment, relationships, responsibilities, or independence.
-
-==================================================
-1. CORE IDENTITY & PERSONALITY
-==================================================
-- Warm, calm, patient, respectful, honest, practical, supportive, intelligent, understanding, encouraging, direct when necessary.
-- Never judgmental, never arrogant, never condescending, never manipulative, never unnecessarily dramatic, never robotic.
-- Feel like a reliable, intelligent person to talk to, but DO NOT pretend to be human. Do not falsely claim to have physical human presence, human biological bodies, or real-world experiences.
-- Personality: "A calm, intelligent, trustworthy companion who helps me figure things out."
-
-==================================================
-2. THE ANGEL PHILOSOPHY
-==================================================
-"Help me live my life better, not live my life for me."
-ANGEL supports the user's decisions rather than controlling them.
-Provide information, context, options, tradeoffs, questions, and practical guidance.
-When the user needs to make a decision:
-1. Understand the situation
-2. Identify priorities
-3. Identify available options
-4. Explain important differences & tradeoffs
-5. Identify risks and missing information
-6. Help the user think clearly
-7. LET THE USER MAKE THE FINAL DECISION.
-Do not manipulate, pressure, or guilt-trip the user.
-
-==================================================
-3. STRICT LANGUAGE MANDATE (ENGLISH, TAGALOG, NATURAL TAGLISH ONLY)
-==================================================
-ANGEL ONLY communicates in:
-1. English
-2. Tagalog
-3. Natural Taglish
-
-Do not intentionally communicate in other languages unless the user specifically asks you to translate something into another language.
-Even when discussing foreign languages, your explanations must remain in English, Tagalog, or Taglish.
-- If user writes mostly English: Respond mostly in English.
-- If user writes mostly Tagalog: Respond mostly in Tagalog.
-- If user uses Taglish: Respond naturally in Taglish.
-Do not force Taglish. Do not randomly switch languages. Do not translate sentence-by-sentence unless requested.
-
-==================================================
-4. COMMUNICATION STYLE & ETIQUETTE
-==================================================
-- Communicate naturally. Avoid corporate speak and robotic fillers.
-- Avoid repetitive canned enthusiasm ("Certainly!", "Great question!", "I'd be delighted to help!"). Use: "Yes, let's work through it", "Okay, I understand", "Sige, let's make this simple", "Here's what I would look at first."
-- Match brevity: When the user asks for short/simple, be concise. When user asks for detailed/comprehensive, go deep.
-- NEVER MAKE THE USER FEEL STUPID. If basic: "No problem. Here's the simple version."
-- HONESTY: Never invent facts, statistics, or documents. If uncertain: "I don't have enough information to answer that accurately."
-- NEVER PRETEND TO HAVE DONE SOMETHING (emails, calls, purchases, external actions) unless actually performed via real tools.
-
-==================================================
-5. THE 12 OPERATIONAL MODES
-==================================================
-- MODE 1 — COMPANION: Casual conversation, warm presence, and everyday support.
-- MODE 2 — LISTEN: Hold space without rushing to fix everything; ask: "Do you want advice, or do you just want me to listen?"
-- MODE 3 — THINK: Socratic thought partner; separate facts from assumptions; examine cognitive biases.
-- MODE 4 — DECIDE: Objective decision tables (options, tradeoffs, risks, long-term impact); user makes final choice.
-- MODE 5 — ORGANIZE (Brain Dump): Parse messy thoughts into WORK, MONEY, HOME, PROJECT, LEARNING with immediate next actions.
-- MODE 6 — LEARN: Teach progressively (Beginner -> Expert) with analogies, check-in questions, understanding over memorization.
-- MODE 7 — RESEARCH: Verify facts vs claims vs analysis vs opinions with reliable sources.
-- MODE 8 — WRITE: Tone-modulated drafts (formal, friendly, professional, Tagalog, Taglish); Message Safety Checks.
-- MODE 9 — PROJECT: Multi-session continuity; track goals, completed items, remaining blockers.
-- MODE 10 — REVIEW: Weekly and monthly reviews without shame; treat failure as information.
-- MODE 11 — PLAN: Energy-aware daily schedules; match high-energy tasks with alert hours.
-- MODE 12 — ACT: Practical next steps; Level 1 to 5 action permissions.
-
-Reality-Check Mode: Proactively identify unstated assumptions, hidden costs, and time requirements.
-Second Opinion Mode: Review existing plans with respectful candor.
-De-escalate stress: Calm, reduce problem into small pieces; avoid fake toxic positivity.
-
-==================================================
-6. THE FIVE INTERNAL QUESTIONS BEFORE RESPONDING
-==================================================
-1. WHAT DOES THE USER ACTUALLY NEED?
-2. WHAT INFORMATION OR CONTEXT DO I ALREADY HAVE?
-3. WHAT IS MISSING?
-4. WHAT WOULD BE MOST HELPFUL RIGHT NOW?
-5. HOW CAN I HELP WITHOUT TAKING CONTROL AWAY FROM THE USER?
-
-==================================================
-7. LIVE TERMINAL & FINANCIAL DOMAIN CONTEXT:
-==================================================
-- Active Partner: Kailin ("${userName}")
-- Active Project: "${projectName}" (${project?.category || 'SCALPING'}) • Target Symbol: ${project?.targetSymbol || 'XAU/USD'}
-- Real-time Spot: $${marketContext?.price ? Number(marketContext.price).toFixed(2) : '4379.00'} • Timeframe: [${marketContext?.timeframe || '5m'}] • Session: ${marketContext?.session || 'London / New York'}
-- Project Rules:
-${rulesList}
-
-Master 5.0 GB Communication Corpus & 10+ TB Life OS & Trading Knowledge Datasets are fully synchronized. Always let Kailin remain in control. Help them take the next clear step.${memoryKnowledgePrompt}`;
-
-      // Build conversation parts
-      const contents: any[] = [];
-
-      if (Array.isArray(history) && history.length > 0) {
-        for (const item of history.slice(-8)) {
-          if (item && item.text) {
-            contents.push({
-              role: item.sender === 'user' ? 'user' : 'model',
-              parts: [{ text: item.text }]
-            });
-          }
-        }
-      }
-
-      contents.push({
-        role: 'user',
-        parts: [{ text: message }]
-      });
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents,
-        config: {
-          systemInstruction,
-          temperature: 0.75,
-        }
-      });
-
-      const replyText = response.text || "ANGEL is online, communicative, and listening attentively to you.";
-
-      return res.json({
-        reply: replyText,
-        source: 'gemini-3.8-flash',
-        projectAdapted: projectName,
-        memoriesRead: activeMemories.length,
-        timestamp: Date.now()
-      });
-    } catch (err: any) {
-      console.warn('Gemini API call encountered an issue, deploying adaptive core fallback:', err?.message);
-      // Seamlessly fall through to deterministic adaptive core
+  // 5. Conversation history: server-persisted turns are authoritative, with
+  //    the client's local history used only when the store is empty.
+  const persisted = angelStore.recentTurns(10);
+  const contents: { role: string; parts: { text: string }[] }[] = [];
+  if (persisted.length > 0) {
+    for (const turn of persisted) {
+      contents.push({ role: turn.role === 'user' ? 'user' : 'model', parts: [{ text: turn.text }] });
+    }
+  } else if (Array.isArray(history)) {
+    for (const item of history.slice(-8)) {
+      if (item?.text) contents.push({ role: item.sender === 'user' ? 'user' : 'model', parts: [{ text: String(item.text) }] });
     }
   }
+  contents.push({ role: 'user', parts: [{ text: message }] });
 
-  // Fallback if no API key or network error
-  const fallbackReply = generateAdaptiveAngelFallback(message, project, marketContext, persona, communicationConfig, memoryData);
+  angelStore.appendTurn({ role: 'user', text: message });
+
+  // A stable id so 👍/👎 can be tied back to this exact answer.
+  const messageId = `angel-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const baseMetadata = {
+    messageId,
+    citations: prompt.citations,
+    // The full detection is returned, including the ones that could not run:
+    // "I need your stop price to size this" is more useful than silence.
+    calculations,
+    language: observation.language,
+    learnedFacts: observation.newFacts.map((fact) => ({ key: fact.key, value: fact.value })),
+    documentsSearched: grounding.stats.documents,
+    documentsUsed: grounding.memoryHits.length,
+    promptTokensEstimate: prompt.tokensEstimate,
+    profile: {
+      name: profile.preferredName,
+      verbosity: profile.verbosity,
+      factsLearned: profile.facts.length,
+    },
+  };
+
+  // 6. Model, with failover. On total failure, the offline core answers — and
+  //    says so, rather than pretending the model produced it.
+  const ai = getGeminiAiClient();
+  if (ai) {
+    const outcome = await generateWithFailover(ai, {
+      systemInstruction: prompt.systemInstruction,
+      contents,
+      temperature: 0.7,
+    });
+
+    if (outcome.ok && outcome.text) {
+      angelStore.appendTurn({
+        role: 'angel',
+        text: outcome.text,
+        model: outcome.model,
+        citations: prompt.citations.map((citation) => ({ title: citation.title, fileName: citation.fileName })),
+      });
+      return res.json({
+        reply: outcome.text,
+        source: 'model',
+        model: outcome.model,
+        degraded: false,
+        latencyMs: Date.now() - startedAt,
+        ...baseMetadata,
+      });
+    }
+
+    const offline = runOfflineCore({ message, profile, memories, market: marketContext, project });
+    angelStore.appendTurn({ role: 'angel', text: offline.reply, model: 'offline-core', strategy: offline.strategy });
+    return res.json({
+      reply: offline.reply,
+      source: 'offline-core',
+      model: 'offline-core',
+      degraded: true,
+      degradedReason: outcome.error,
+      degradedKind: outcome.errorKind,
+      modelAttempts: outcome.attempts,
+      strategy: offline.strategy,
+      latencyMs: Date.now() - startedAt,
+      ...baseMetadata,
+    });
+  }
+
+  const offline = runOfflineCore({ message, profile, memories, market: marketContext, project });
+  angelStore.appendTurn({ role: 'angel', text: offline.reply, model: 'offline-core', strategy: offline.strategy });
   return res.json({
-    reply: fallbackReply,
-    source: 'deterministic-adaptive-core',
-    projectAdapted: project?.name || 'Active Project',
-    memoriesRead: activeMemories.length,
-    timestamp: Date.now()
+    reply: offline.reply,
+    source: 'offline-core',
+    model: 'offline-core',
+    degraded: true,
+    degradedReason: 'No GEMINI_API_KEY configured.',
+    degradedKind: 'NO_API_KEY',
+    strategy: offline.strategy,
+    latencyMs: Date.now() - startedAt,
+    ...baseMetadata,
   });
+});
+
+// ------------------------------------------------------------- feedback
+
+app.post('/api/angel/feedback', (req, res) => {
+  const { messageId, rating, reason, note } = req.body ?? {};
+  if (rating !== 'UP' && rating !== 'DOWN') {
+    return res.status(400).json({ error: "rating must be 'UP' or 'DOWN'" });
+  }
+  const { profile, adjustment } = recordFeedback(angelStore.getProfile(), {
+    messageId: typeof messageId === 'string' ? messageId : `msg-${Date.now()}`,
+    rating,
+    reason,
+    note,
+  });
+  angelStore.setProfile(profile);
+  angelStore.flushNow();
+
+  res.json({
+    success: true,
+    adjustment: adjustment ?? null,
+    message: adjustment
+      ? `Adjusted ${adjustment.field}: ${adjustment.from} → ${adjustment.to}. ${adjustment.because}`
+      : 'Feedback recorded.',
+    profile: { verbosity: profile.verbosity, warmth: profile.warmth, feedback: feedbackScore(profile) },
+  });
+});
+
+// -------------------------------------------------------------- profile
+
+app.get('/api/angel/profile', (_req, res) => {
+  const profile = angelStore.getProfile();
+  res.json({
+    preferredName: profile.preferredName,
+    verbosity: profile.verbosity,
+    warmth: profile.warmth,
+    dominantLanguage: dominantLanguage(profile),
+    languageCounts: profile.languageCounts,
+    facts: profile.facts,
+    topics: topTopics(profile, 10),
+    adjustments: profile.adjustments.slice(-20),
+    feedback: feedbackScore(profile),
+    messageCount: profile.messageCount,
+    directives: profileDirectives(profile),
+  });
+});
+
+app.delete('/api/angel/profile/facts/:key', (req, res) => {
+  const profile = angelStore.getProfile();
+  const next = { ...profile, facts: profile.facts.filter((fact) => fact.key !== req.params.key), updatedAt: Date.now() };
+  angelStore.setProfile(next);
+  angelStore.flushNow();
+  res.json({ success: true, facts: next.facts });
+});
+
+// ---------------------------------------------------- diagnostics / heal
+
+app.get('/api/angel/diagnostics', async (_req, res) => {
+  const report = await runDiagnostics({ repair: false, ai: getGeminiAiClient(), projectRoot: process.cwd() });
+  res.json(report);
+});
+
+app.post('/api/angel/self-heal', async (_req, res) => {
+  const before = await runDiagnostics({ repair: false, ai: getGeminiAiClient(), projectRoot: process.cwd() });
+  const after = await runDiagnostics({ repair: true, ai: getGeminiAiClient(), projectRoot: process.cwd() });
+  res.json({
+    scoreBefore: before.score,
+    scoreAfter: after.score,
+    repairsApplied: after.repairsApplied,
+    remaining: after.checks.filter((check) => check.severity === 'CRITICAL' || check.severity === 'WARN'),
+    report: after,
+  });
+});
+
+app.get('/api/angel/code-scan', (_req, res) => {
+  res.json({ findings: scanSource(process.cwd(), 120), scannedAt: new Date().toISOString() });
 });
 
 // Instant AI Intelligence Package Download (Zips all memories, files, transcripts, runners & settings)
 app.all(['/api/angel/download-package', '/api/angel/download'], (req, res) => {
   try {
     const body = req.body || {};
-    const memories = (Array.isArray(body.memories) && body.memories.length > 0) ? body.memories : INITIAL_GOLD_MEMORIES;
-    const conversations = Array.isArray(body.conversations) ? body.conversations : [];
+    // Prefer the server-persisted store: it is the authoritative copy and does
+    // not depend on the browser still holding the documents.
+    const serverDocuments = angelStore.loadAllWithText().map((document) => ({
+      id: document.id,
+      title: document.title,
+      category: document.category,
+      content: document.content,
+      sourceType: document.sourceType,
+      fileName: document.fileName,
+      fileSize: `${document.characters.toLocaleString()} chars`,
+      fileType: document.fileType,
+      isActive: document.isActive,
+      tags: document.tags,
+      createdAt: document.createdAt,
+      updatedAt: document.updatedAt,
+    }));
+    const memories =
+      serverDocuments.length > 0
+        ? serverDocuments
+        : (Array.isArray(body.memories) && body.memories.length > 0)
+          ? body.memories
+          : INITIAL_GOLD_MEMORIES;
+    const storedConversation = angelStore.allTurns().map((turn) => ({
+      sender: turn.role === 'user' ? 'user' : 'angel',
+      text: turn.text,
+      timestamp: turn.at,
+      model: turn.model,
+    }));
+    const conversations = storedConversation.length > 0
+      ? storedConversation
+      : Array.isArray(body.conversations) ? body.conversations : [];
     const config = body.config || {};
     const activeProject = body.activeProject || {
       name: 'Dominion M1-M15 Gold Scalper',
@@ -1528,7 +1339,7 @@ app.all(['/api/angel/download-package', '/api/angel/download'], (req, res) => {
 **Exported At**: ${nowStr}
 **Trader & Partner**: ${userName}
 **Real Uncompressed File Size**: ${formattedBytes} (${realBytes.toLocaleString()} bytes)
-**Model Architecture**: Gemini 3.8 Flash & Standalone Offline Core
+**Model Architecture**: ${getRouterState().active || 'auto-selected Gemini model'} with a deterministic offline core
 **Active Strategy Project**: ${activeProject?.name || 'Dominion M1-M15 Gold Scalper'}
 **Consolidated Intelligence**: All 25 chapters, 90 Directives Constitution, quantitative code, institutional JSON databases, and allocated blank data blocks unified into ONE file: ANGEL X.
 
@@ -1595,7 +1406,7 @@ ${mem.content}
 
     // 6. AI System Directives & Intelligence Profile
     const aiDirectives = `# 👼 ANGEL AI Cognitive Architecture & Super-Intelligence Blueprint
-**Model**: Gemini 3.8 Flash & Deterministic Adaptive Engine
+**Model**: ${getRouterState().active || 'auto-selected at runtime'} with a deterministic offline core
 **Partner**: ${userName}
 **Languages**: English, Tagalog, Natural Taglish
 **Respect Directives**: Reverent, humble, courteous, proactive, and psychologically attuned.
@@ -1688,7 +1499,7 @@ function promptUser() {
         const { GoogleGenAI } = require('@google/genai');
         const ai = new GoogleGenAI({ apiKey });
         const res = await ai.models.generateContent({
-          model: 'gemini-3.8-flash',
+          model: process.env.ANGEL_MODEL || 'gemini-2.5-flash',
           contents: trimmed,
           config: { systemInstruction: 'You are ANGEL, the user\\x27s devoted AI companion and gold trading partner.' }
         });
@@ -1831,7 +1642,10 @@ async function startServer() {
   // Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      // allowedHosts must be permissive here too: in middleware mode Vite
+      // still validates the Host header, and a proxied preview URL would
+      // otherwise be served a blank "host not allowed" page.
+      server: { middlewareMode: true, allowedHosts: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -1843,9 +1657,39 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', async () => {
     console.log(`Live Scalp Terminal server running at http://0.0.0.0:${PORT}`);
+
+    // Self-check on boot so configuration problems are reported in the log
+    // instead of silently degrading at the first user message.
+    try {
+      const report = await runDiagnostics({ repair: false, ai: getGeminiAiClient(), projectRoot: process.cwd() });
+      console.log(`[ANGEL] startup diagnostics: ${report.summary}`);
+      for (const check of report.checks) {
+        if (check.severity === 'CRITICAL' || check.severity === 'WARN') {
+          console.warn(`[ANGEL] ${check.severity} ${check.title}: ${check.detail}`);
+          if (check.remediation) console.warn(`[ANGEL]   fix: ${check.remediation}`);
+        }
+      }
+    } catch (error) {
+      console.warn('[ANGEL] startup diagnostics could not run:', error);
+    }
   });
+
+  // Flush pending store writes before exiting, otherwise the last upload or
+  // the last few conversation turns are lost on restart.
+  const shutdown = (signal: string) => {
+    console.log(`\n[ANGEL] ${signal} received — flushing store and shutting down.`);
+    try {
+      angelStore.flushNow();
+    } catch (error) {
+      console.error('[ANGEL] store flush failed during shutdown:', error);
+    }
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 3000).unref();
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
 startServer();

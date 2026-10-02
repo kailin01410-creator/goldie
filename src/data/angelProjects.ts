@@ -104,7 +104,7 @@ export const ANGEL_PERSONA_OPTIONS = [
 export const ANGEL_COMMUNICATION_STYLE_OPTIONS: { id: AngelCommunicationStyle; label: string; desc: string; icon: string }[] = [
   {
     id: 'GEMINI_COMPANION',
-    label: 'Gemini Natural Human Companion (5GB Corpus)',
+    label: 'Natural Human Companion',
     desc: 'Speaks like your warmest, smartest companion—expressive, emotionally intelligent, attentive, inquiring, witty, and deeply human.',
     icon: 'Sparkles',
   },
