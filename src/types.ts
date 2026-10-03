@@ -608,6 +608,9 @@ export interface GoldMemoryItem {
 }
 
 export interface UploadVerificationReport {
+  id?: string;
+  documentIds?: string[];
+  backendSynced?: boolean;
   fileName: string;
   fileType: string;
   originalSizeBytes: number;

@@ -25,7 +25,13 @@ import {
 import { soundAlertService } from '../utils/audioAlerts';
 import { saveMemoriesToIndexedDb, loadMemoriesFromIndexedDb } from '../utils/indexedDbStorage';
 import { INITIAL_ANGEL_PROJECTS } from '../data/angelProjects';
-import { INITIAL_GOLD_MEMORIES, mergeAllMemoriesIntoAngelX, ANGEL_X_MASTER_FILE } from '../data/goldMemoryData';
+import { 
+  INITIAL_GOLD_MEMORIES, 
+  mergeAllMemoriesIntoAngelX, 
+  removeUploadedFileFromAngelX,
+  clearSupplementalFilesFromAngelX,
+  ANGEL_X_MASTER_FILE 
+} from '../data/goldMemoryData';
 import { readJson, readString, writeJson, writeString, removeKey } from '../utils/safeStorage';
 import { INITIAL_INSTRUMENTS } from '../data/instruments';
 import { getDominionTimeframe } from '../data/timeframes';
@@ -892,6 +898,22 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       createdAt: itemData.createdAt || Date.now(),
       updatedAt: Date.now(),
     };
+
+    // Sync new item to backend store
+    fetch('/api/angel/memories', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: newItem.id,
+        title: newItem.title,
+        content: newItem.content,
+        category: newItem.category,
+        sourceType: newItem.sourceType,
+        fileName: newItem.fileName || newItem.title,
+        tags: newItem.tags,
+      }),
+    }).catch(() => {});
+
     setGoldMemories(prev => {
       const consolidated = mergeAllMemoriesIntoAngelX([newItem, ...prev]);
       safePersistMemories([consolidated]);
@@ -908,6 +930,29 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       createdAt: itemData.createdAt || (Date.now() + idx),
       updatedAt: Date.now() + idx,
     }));
+
+    // Sync batch items to backend store
+    void (async () => {
+      for (const item of newItems) {
+        try {
+          await fetch('/api/angel/memories', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              id: item.id,
+              title: item.title,
+              content: item.content,
+              category: item.category,
+              sourceType: item.sourceType,
+              fileName: item.fileName || item.title,
+              tags: item.tags,
+            }),
+          });
+        } catch {
+          break;
+        }
+      }
+    })();
 
     setGoldMemories(prev => {
       const consolidated = mergeAllMemoriesIntoAngelX([...newItems, ...prev]);
@@ -926,11 +971,33 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     });
   }, [safePersistMemories]);
 
-  const deleteGoldMemory = useCallback((id: string) => {
+  const deleteGoldMemory = useCallback((idOrFileName: string) => {
+    const target = idOrFileName.trim();
+    if (!target) return;
+
+    // Delete from backend server disk store
+    fetch(`/api/angel/uploads/${encodeURIComponent(target)}`, {
+      method: 'DELETE',
+    }).catch(() => {});
+
     setGoldMemories(prev => {
-      const filtered = prev.filter(m => m.id !== id);
-      safePersistMemories(filtered);
-      return filtered;
+      const norm = target.toLowerCase();
+      const filtered = prev
+        .filter(m => m.id !== target && m.fileName?.toLowerCase() !== norm && m.title?.toLowerCase() !== norm)
+        .map(m => {
+          if (m.id === 'angel-x' || m.fileName === 'ANGEL X') {
+            return removeUploadedFileFromAngelX(m, {
+              id: target,
+              fileName: target,
+              title: target,
+              checksum: target,
+            });
+          }
+          return m;
+        });
+      const finalItems = filtered.length > 0 ? filtered : [clearSupplementalFilesFromAngelX()];
+      safePersistMemories(finalItems);
+      return finalItems;
     });
   }, [safePersistMemories]);
 
@@ -943,8 +1010,12 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   }, []);
 
   const clearAllGoldMemories = useCallback(() => {
-    setGoldMemories([ANGEL_X_MASTER_FILE]);
-    safePersistMemories([ANGEL_X_MASTER_FILE]);
+    fetch('/api/angel/uploads?all=true', {
+      method: 'DELETE',
+    }).catch(() => {});
+    const cleanMaster = clearSupplementalFilesFromAngelX();
+    setGoldMemories([cleanMaster]);
+    safePersistMemories([cleanMaster]);
   }, [safePersistMemories]);
 
   const consolidateAllIntoAngelX = useCallback(() => {

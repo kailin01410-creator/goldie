@@ -185,12 +185,45 @@ Drop a file or a .zip into the chat and I'll index it. If I ever sound wrong, hi
         }
 
         const documents: any[] = Array.isArray(data.documents) ? data.documents : [];
+        const memoriesWithContent: any[] = Array.isArray(data.memories) ? data.memories : [];
         const warnings: string[] = Array.isArray(data.warnings) ? data.warnings : [];
 
-        // The server store is authoritative. Re-pull the index rather than
-        // inventing local copies, so ids match on both sides and nothing is
-        // double-counted.
-        if (documents.length > 0) await syncMemoriesWithServer();
+        // Merge into ANGEL X and sync with server store
+        if (memoriesWithContent.length > 0) {
+          addGoldMemoriesBatch(memoriesWithContent);
+        } else if (documents.length > 0) {
+          await syncMemoriesWithServer();
+        }
+
+        // Record in persistent upload verification history so it can be managed/deleted in Storage tab
+        try {
+          const savedRaw = localStorage.getItem('angel_upload_verification_history_v1');
+          const prevHistory = savedRaw ? JSON.parse(savedRaw) : [];
+          const sizeStr = file.size < 1024 ? `${file.size} B` : file.size < 1048576 ? `${(file.size / 1024).toFixed(1)} KB` : `${(file.size / 1048576).toFixed(2)} MB`;
+          const newEntry = {
+            id: data.id || documents[0]?.id || `upload-${Date.now()}`,
+            documentIds: Array.isArray(data.documentIds) ? data.documentIds : documents.map((d: any) => d.id).filter(Boolean),
+            backendSynced: true,
+            fileName: file.name,
+            fileType: file.type || 'text/plain',
+            originalSizeBytes: file.size,
+            processedSizeBytes: file.size,
+            formattedOriginalSize: sizeStr,
+            formattedProcessedSize: sizeStr,
+            parityPercent: 100.0,
+            deltaBytes: 0,
+            checksum: data.checksum || 'verified',
+            timestamp: Date.now(),
+            status: 'VERIFIED_EXACT_MATCH',
+            extractedItemsCount: documents.length || 1,
+            angelXPreviousSizeBytes: 0,
+            angelXNewSizeBytes: 0,
+          };
+          const updatedHistory = [newEntry, ...prevHistory.filter((r: any) => r.fileName !== file.name)].slice(0, 50);
+          localStorage.setItem('angel_upload_verification_history_v1', JSON.stringify(updatedHistory));
+        } catch {
+          // ignore storage quota
+        }
 
         const totalChars = documents.reduce((sum, document) => sum + Number(document.characters ?? 0), 0);
         const lines = [

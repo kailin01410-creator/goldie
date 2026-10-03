@@ -2,7 +2,10 @@ import JSZip from 'jszip';
 import { GoldMemoryItem, GoldMemoryCategory, UploadVerificationReport } from '../types';
 
 export interface ExtractedMemoryResult {
-  memories: Omit<GoldMemoryItem, 'id' | 'createdAt' | 'updatedAt'>[];
+  id?: string;
+  documentIds?: string[];
+  backendSynced?: boolean;
+  memories: (Omit<GoldMemoryItem, 'id' | 'createdAt' | 'updatedAt'> & { id?: string })[];
   summaryMessage: string;
   filesProcessed: number;
   originalSizeBytes: number;
@@ -525,6 +528,9 @@ export const uploadFileViaServer = (
             }
 
             resolve({
+              id: data.id || data.memories[0]?.id,
+              documentIds: Array.isArray(data.documentIds) ? data.documentIds : data.memories.map((m: any) => m.id).filter(Boolean),
+              backendSynced: true,
               memories: data.memories,
               summaryMessage: data.summary || `✓ Size Match Verified: "${fileName}" (${formatSize(originalBytes)}) preserved with 100% byte integrity.`,
               filesProcessed: data.extractedCount || data.memories.length,

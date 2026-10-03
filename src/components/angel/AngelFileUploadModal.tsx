@@ -14,7 +14,8 @@ import {
   Zap, 
   ArrowRight,
   Download,
-  Check
+  Check,
+  Trash2
 } from 'lucide-react';
 import { GoldMemoryItem, UploadVerificationReport } from '../../types';
 import { 
@@ -35,6 +36,7 @@ interface AngelFileUploadModalProps {
   goldMemories: GoldMemoryItem[];
   initialFile?: File | null;
   onMergeComplete: (mergedAngelX: GoldMemoryItem, report: UploadVerificationReport) => void;
+  onDeleteUploadedFile?: (report: UploadVerificationReport) => void;
 }
 
 export const AngelFileUploadModal: React.FC<AngelFileUploadModalProps> = ({
@@ -43,7 +45,8 @@ export const AngelFileUploadModal: React.FC<AngelFileUploadModalProps> = ({
   angelXFile,
   goldMemories,
   initialFile,
-  onMergeComplete
+  onMergeComplete,
+  onDeleteUploadedFile
 }) => {
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -83,28 +86,54 @@ export const AngelFileUploadModal: React.FC<AngelFileUploadModalProps> = ({
     });
 
     try {
-      const isZip = file.name.toLowerCase().endsWith('.zip') || file.type.includes('zip');
       let extractedResult;
+      let serverId: string | undefined;
+      let serverDocumentIds: string[] = [];
+      let backendSynced = false;
 
-      // Real extraction with continuous progress reporting
+      // 1. Primary path: Upload to Backend Server for persistent disk storage & deep extraction
       try {
-        extractedResult = await extractFileToMemories(file, (p) => {
-          setProgressInfo(p);
-        });
-      } catch (browserErr) {
-        console.warn('Browser parser failed, delegating to high-speed server pipeline:', browserErr);
-        setProgressInfo({
-          percent: 50,
-          stage: 'UPLOADING',
-          bytesLoaded: Math.floor(originalBytes * 0.5),
-          totalBytes: originalBytes,
-          speedBps: originalBytes,
-          statusText: `Transferring "${file.name}" to high-capacity server extraction engine...`
-        });
-
         extractedResult = await uploadFileViaServer(file, (p) => {
           setProgressInfo(p);
         });
+        serverId = extractedResult.id;
+        serverDocumentIds = extractedResult.documentIds || [];
+        backendSynced = true;
+      } catch (serverErr) {
+        console.warn('Server upload fallback to local browser extraction:', serverErr);
+        extractedResult = await extractFileToMemories(file, (p) => {
+          setProgressInfo(p);
+        });
+
+        // Also attempt to push extracted memories to backend /api/angel/memories
+        if (extractedResult?.memories?.length) {
+          for (const mem of extractedResult.memories) {
+            try {
+              const syncRes = await fetch('/api/angel/memories', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  title: mem.title || file.name,
+                  content: mem.content,
+                  category: mem.category || 'UPLOADED_DOC',
+                  sourceType: 'FILE_UPLOAD',
+                  fileName: mem.fileName || file.name,
+                  tags: mem.tags || ['Uploaded File'],
+                }),
+              });
+              if (syncRes.ok) {
+                const syncData = await syncRes.json();
+                if (syncData?.document?.id) {
+                  serverDocumentIds.push(syncData.document.id);
+                  if (!serverId) serverId = syncData.document.id;
+                  backendSynced = true;
+                }
+              }
+            } catch {
+              // Offline fallback remains intact in IndexedDB
+            }
+          }
+        }
       }
 
       if (!extractedResult || !extractedResult.memories || extractedResult.memories.length === 0) {
@@ -122,7 +151,13 @@ export const AngelFileUploadModal: React.FC<AngelFileUploadModalProps> = ({
       });
 
       // Merge into ANGEL X master file
-      const memoriesToMerge = [...goldMemories, ...extractedResult.memories];
+      const normalizedMemories: GoldMemoryItem[] = extractedResult.memories.map((m, idx) => ({
+        ...m,
+        id: m.id || serverDocumentIds[idx] || `upload-${Date.now()}-${idx}`,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      }));
+      const memoriesToMerge = [...goldMemories, ...normalizedMemories];
       const mergedAngelX = mergeAllMemoriesIntoAngelX(memoriesToMerge);
       const newAngelXBytes = getUtf8ByteLength(mergedAngelX.content || '');
 
@@ -130,13 +165,10 @@ export const AngelFileUploadModal: React.FC<AngelFileUploadModalProps> = ({
       const finalChecksum = extractedResult.checksum || await computeFileSha256(file);
       const processedBytes = extractedResult.processedSizeBytes || originalBytes;
 
-      // Size Parity Calculation
-      const deltaBytes = Math.abs(originalBytes - processedBytes);
-      const parityPercent = originalBytes > 0 
-        ? Math.min(100, Math.max(99.9, Number(((1 - deltaBytes / originalBytes) * 100).toFixed(2))))
-        : 100;
-
       const report: UploadVerificationReport = {
+        id: serverId || normalizedMemories[0]?.id,
+        documentIds: serverDocumentIds.length > 0 ? serverDocumentIds : normalizedMemories.map(m => m.id),
+        backendSynced,
         fileName: file.name,
         fileType: file.type || 'text/plain',
         originalSizeBytes: originalBytes,
@@ -547,13 +579,30 @@ export const AngelFileUploadModal: React.FC<AngelFileUploadModalProps> = ({
 
               {/* Action Buttons */}
               <div className="flex items-center justify-between pt-2 border-t border-[#1C2C4A] flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={handleReset}
-                  className="px-3.5 py-2 rounded-xl text-xs font-mono font-bold text-slate-300 hover:text-white bg-[#141F33] hover:bg-[#1B2944] border border-[#233352] transition-colors cursor-pointer"
-                >
-                  + Upload Another File
-                </button>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={handleReset}
+                    className="px-3.5 py-2 rounded-xl text-xs font-mono font-bold text-slate-300 hover:text-white bg-[#141F33] hover:bg-[#1B2944] border border-[#233352] transition-colors cursor-pointer"
+                  >
+                    + Upload Another File
+                  </button>
+
+                  {onDeleteUploadedFile && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onDeleteUploadedFile(verificationReport);
+                        handleReset();
+                      }}
+                      className="px-3.5 py-2 rounded-xl text-xs font-mono font-bold text-rose-300 hover:text-white bg-rose-500/15 hover:bg-rose-500/30 border border-rose-500/40 transition-colors cursor-pointer flex items-center gap-1.5"
+                      title="Delete this uploaded file from Backend Server & ANGEL X"
+                    >
+                      <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                      <span>Delete Uploaded File</span>
+                    </button>
+                  )}
+                </div>
 
                 <button
                   type="button"

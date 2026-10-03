@@ -261,6 +261,83 @@ export class AngelStore {
     return true;
   }
 
+  /**
+   * Delete one or more uploaded documents matching id, fileName, title, or checksum prefix.
+   */
+  deleteDocumentsByCriteria(criteria: {
+    id?: string;
+    documentIds?: string[];
+    fileName?: string;
+    title?: string;
+    checksum?: string;
+  }): { deletedCount: number; deletedIds: string[]; deletedFileNames: string[] } {
+    const targetIds = new Set<string>();
+    if (criteria.id) targetIds.add(criteria.id.trim());
+    if (Array.isArray(criteria.documentIds)) {
+      for (const did of criteria.documentIds) {
+        if (typeof did === 'string' && did.trim()) targetIds.add(did.trim());
+      }
+    }
+    const normFileName = criteria.fileName?.trim().toLowerCase();
+    const normTitle = criteria.title?.trim().toLowerCase();
+    const normChecksum = criteria.checksum?.trim().toLowerCase();
+
+    const toDelete = this.index.documents.filter((doc) => {
+      if (targetIds.has(doc.id)) return true;
+      if (normFileName && doc.fileName?.trim().toLowerCase() === normFileName) return true;
+      if (normFileName && doc.title?.trim().toLowerCase() === normFileName) return true;
+      if (normTitle && doc.title?.trim().toLowerCase() === normTitle) return true;
+      if (normChecksum && normChecksum.length >= 6 && doc.contentHash.toLowerCase().startsWith(normChecksum)) return true;
+      return false;
+    });
+
+    const deletedIds: string[] = [];
+    const deletedFileNames: string[] = [];
+
+    for (const doc of toDelete) {
+      deletedIds.push(doc.id);
+      if (doc.fileName) deletedFileNames.push(doc.fileName);
+      else if (doc.title) deletedFileNames.push(doc.title);
+      try {
+        fs.unlinkSync(this.documentPath(doc.id));
+      } catch {
+        /* file may already be gone */
+      }
+    }
+
+    if (deletedIds.length > 0) {
+      const deletedSet = new Set(deletedIds);
+      this.index.documents = this.index.documents.filter((doc) => !deletedSet.has(doc.id));
+      this.flushNow();
+    }
+
+    return {
+      deletedCount: deletedIds.length,
+      deletedIds,
+      deletedFileNames,
+    };
+  }
+
+  /**
+   * Clear all user-uploaded documents from the backend disk store.
+   */
+  clearAllDocuments(): { deletedCount: number; deletedIds: string[] } {
+    const deletedIds = this.index.documents.map((doc) => doc.id);
+    for (const id of deletedIds) {
+      try {
+        fs.unlinkSync(this.documentPath(id));
+      } catch {
+        /* best effort */
+      }
+    }
+    this.index.documents = [];
+    this.flushNow();
+    return {
+      deletedCount: deletedIds.length,
+      deletedIds,
+    };
+  }
+
   /* ---------------------------- conversation --------------------------- */
 
   appendTurn(turn: Omit<StoredConversationTurn, 'id' | 'at'> & { id?: string; at?: number }): StoredConversationTurn {
