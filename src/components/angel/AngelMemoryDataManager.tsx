@@ -113,7 +113,9 @@ export const AngelMemoryDataManager: React.FC<AngelMemoryDataManagerProps> = ({ 
     try {
       const saved = localStorage.getItem('angel_upload_verification_history_v1');
       if (saved) return JSON.parse(saved);
-    } catch {}
+    } catch (error) {
+      console.warn('Upload verification history could not be read; starting empty.', error);
+    }
     return [];
   });
 
@@ -169,7 +171,9 @@ export const AngelMemoryDataManager: React.FC<AngelMemoryDataManagerProps> = ({ 
       const updated = [report, ...prev.filter(r => r.fileName !== report.fileName)].slice(0, 30);
       try {
         localStorage.setItem('angel_upload_verification_history_v1', JSON.stringify(updated));
-      } catch {}
+      } catch (error) {
+        console.warn('Upload verification history could not be persisted:', error);
+      }
       return updated;
     });
     setUploadStatus(`✓ Size Match Verified: "${report.fileName}" merged into ANGEL X (${report.formattedOriginalSize} intact with 100% byte parity)`);
@@ -331,7 +335,9 @@ export const AngelMemoryDataManager: React.FC<AngelMemoryDataManagerProps> = ({ 
         setCopiedText(true);
         setTimeout(() => setCopiedText(false), 2000);
       }
-    } catch {}
+    } catch (error) {
+      console.warn('Clipboard copy failed:', error);
+    }
   };
 
   return (

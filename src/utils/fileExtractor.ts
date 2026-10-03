@@ -242,7 +242,12 @@ export const extractFileToMemories = async (
     if (printable.length > 50) {
       textFallback = printable;
     }
-  } catch {}
+  } catch (error) {
+    // Reading the file as text can fail on a binary blob or a revoked handle.
+    // Not fatal — the caller falls back to a metadata-only record below — but
+    // worth logging, because an empty document is otherwise a silent mystery.
+    console.warn(`[fileExtractor] Could not read "${file.name}" as text:`, error);
+  }
 
   const content = textFallback.length > 50
     ? textFallback

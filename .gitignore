@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# ANGEL persistent store (uploaded documents, conversation log, learned profile)
+data/

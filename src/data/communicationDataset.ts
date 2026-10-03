@@ -1,4 +1,9 @@
-// Master 5GB Conversational Intelligence & Human Communication Corpus
+// Human communication reference volumes shown in the Communication tab.
+//
+// These are written principles, not training data. The figures that describe
+// ANGEL's actual capability are measured at runtime from the real corpora in
+// src/ai/datasets/ and exposed by GET /api/angel/knowledge — see
+// COMMUNICATION_CORPUS_STATS. Do not add asserted size constants here.
 // Provides deep interpersonal empathy, natural Gemini-style cadence, emotional intelligence, and Socratic inquiry
 
 export interface CommunicationCorpusVolume {
@@ -170,8 +175,12 @@ export const COMMUNICATION_CORPUS_VOLUMES: CommunicationCorpusVolume[] = [
   }
 ];
 
-export const TOTAL_COMMUNICATION_CORPUS_GB = 5.0;
-export const TOTAL_INDEXED_TOPICS = 2100;
+/**
+ * Number of written volumes below. Counted, not asserted — the previous
+ * constants claimed a 5 GB corpus with 2,100 indexed topics, neither of which
+ * corresponded to anything that existed.
+ */
+export const COMMUNICATION_VOLUME_COUNT = COMMUNICATION_CORPUS_VOLUMES.length;
 
 export const GEMINI_COMMUNICATION_MODES = [
   {

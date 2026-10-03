@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   Sparkles, 
   Heart, 
@@ -38,11 +38,31 @@ import {
 } from '../../data/angelProjects';
 import {
   COMMUNICATION_CORPUS_VOLUMES,
-  TOTAL_COMMUNICATION_CORPUS_GB,
-  TOTAL_INDEXED_TOPICS,
+  COMMUNICATION_VOLUME_COUNT,
   GEMINI_COMMUNICATION_MODES,
   CONVERSATIONAL_STARTER_PROMPTS
 } from '../../data/communicationDataset';
+
+/**
+ * Live, measured figures from GET /api/angel/knowledge.
+ *
+ * This panel used to display invented constants ("5.0 GB data set", "2,100
+ * heuristics", "99.4% EQ rating", a model that does not exist). Everything
+ * below is counted from the data that is actually loaded, so the numbers move
+ * when the corpus does — and can be verified.
+ */
+interface KnowledgeReport {
+  communication: { exemplars: number; principles: number; patterns: number; intents: number; languages: string[]; characters: number };
+  finance: { entries: number; playbooks: number; formulas: number; domains: number; characters: number };
+  userMemory: { documents: number; inactive: number; characters: number };
+  index: { documents: number; chunks: number; terms: number; characters: number };
+}
+
+function compactNumber(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(0)}k`;
+  return String(value);
+}
 
 interface AngelCommunicationTuningProps {
   config: AngelCommunicationConfig;
@@ -58,6 +78,29 @@ export const AngelCommunicationTuning: React.FC<AngelCommunicationTuningProps> =
   activeProjectName
 }) => {
   const [copiedNotification, setCopiedNotification] = useState(false);
+  const [knowledge, setKnowledge] = useState<KnowledgeReport | null>(null);
+  const [activeModel, setActiveModel] = useState<string | null | undefined>(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const [knowledgeResponse, statusResponse] = await Promise.all([
+          fetch('/api/angel/knowledge'),
+          fetch('/api/angel/status'),
+        ]);
+        if (cancelled) return;
+        if (knowledgeResponse.ok) setKnowledge(await knowledgeResponse.json());
+        if (statusResponse.ok) {
+          const status = await statusResponse.json();
+          setActiveModel(status?.activeModel ?? null);
+        }
+      } catch {
+        // Offline: the strip below shows "—" rather than a made-up figure.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
   const [expandedVolumeId, setExpandedVolumeId] = useState<string>('vol-1-empathy');
 
   const handleUpdate = (partial: Partial<AngelCommunicationConfig>) => {
@@ -85,7 +128,7 @@ export const AngelCommunicationTuning: React.FC<AngelCommunicationTuningProps> =
   return (
     <div className="flex-1 overflow-y-auto p-4 space-y-6 bg-[#080B12] text-slate-200 no-scrollbar">
       
-      {/* 5GB Communication Corpus Master Banner */}
+      {/* Communication corpus banner — figures below are measured live. */}
       <div className="bg-gradient-to-r from-amber-500/15 via-cyan-500/15 to-purple-500/15 border border-amber-500/40 rounded-2xl p-4 sm:p-5 shadow-2xl relative overflow-hidden">
         <div className="absolute -top-12 -right-12 w-48 h-48 rounded-full bg-cyan-500/10 blur-3xl pointer-events-none" />
 
@@ -97,15 +140,17 @@ export const AngelCommunicationTuning: React.FC<AngelCommunicationTuningProps> =
             <div>
               <div className="flex items-center gap-2 flex-wrap">
                 <h3 className="text-base font-bold text-white tracking-wide flex items-center gap-2">
-                  Gemini Human Companion & Communication Corpus
+                  How ANGEL talks to you
                 </h3>
                 <span className="text-[10px] font-mono px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/35 font-bold flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-                  5 Knowledge Volumes Synced
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                  {COMMUNICATION_VOLUME_COUNT} written volumes
                 </span>
               </div>
               <p className="text-xs text-slate-300 mt-1 leading-relaxed max-w-2xl">
-                Trained in human emotional intelligence, natural Gemini dialogue cadence, active listening, Socratic inquiry, and empathetic trading psychology.
+                The settings here shape tone and length. The retrieval corpus below is what ANGEL
+                actually draws on when choosing how to phrase a reply — every figure is counted
+                from the loaded data, not asserted.
               </p>
             </div>
           </div>
@@ -126,23 +171,31 @@ export const AngelCommunicationTuning: React.FC<AngelCommunicationTuningProps> =
           </div>
         </div>
 
-        {/* Live Corpus Key Metrics Strip */}
+        {/* Measured corpus metrics — counted live, never asserted. */}
         <div className="mt-4 pt-3.5 border-t border-[#23314E]/60 grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs font-mono">
-          <div className="bg-[#0A0F1D]/80 border border-[#1C2740] rounded-lg px-3 py-2">
-            <span className="text-slate-400 text-[10px] block">CORPUS CAPACITY</span>
-            <span className="text-amber-300 font-bold text-sm">{TOTAL_COMMUNICATION_CORPUS_GB}.0 GB Data Set</span>
+          <div className="bg-[#0A0F1D]/80 border border-[#1C2740] rounded-lg px-3 py-2" title="Worked dialogue examples ANGEL retrieves from when choosing how to phrase a reply.">
+            <span className="text-slate-400 text-[10px] block">STYLE EXAMPLES</span>
+            <span className="text-amber-300 font-bold text-sm">
+              {knowledge ? `${knowledge.communication.exemplars} across ${knowledge.communication.languages.join('/')}` : '—'}
+            </span>
           </div>
-          <div className="bg-[#0A0F1D]/80 border border-[#1C2740] rounded-lg px-3 py-2">
-            <span className="text-slate-400 text-[10px] block">INDEXED TOPICS</span>
-            <span className="text-cyan-300 font-bold text-sm">{TOTAL_INDEXED_TOPICS.toLocaleString()} Heuristics</span>
+          <div className="bg-[#0A0F1D]/80 border border-[#1C2740] rounded-lg px-3 py-2" title="Finance definitions, formulas and playbooks available for grounding.">
+            <span className="text-slate-400 text-[10px] block">FINANCE KNOWLEDGE</span>
+            <span className="text-cyan-300 font-bold text-sm">
+              {knowledge ? `${knowledge.finance.entries} entries · ${knowledge.finance.formulas} formulas` : '—'}
+            </span>
           </div>
-          <div className="bg-[#0A0F1D]/80 border border-[#1C2740] rounded-lg px-3 py-2">
-            <span className="text-slate-400 text-[10px] block">EMPATHY SCORE</span>
-            <span className="text-emerald-300 font-bold text-sm">99.4% EQ Rating</span>
+          <div className="bg-[#0A0F1D]/80 border border-[#1C2740] rounded-lg px-3 py-2" title="Searchable chunks in the retrieval index, including your own uploads.">
+            <span className="text-slate-400 text-[10px] block">SEARCH INDEX</span>
+            <span className="text-emerald-300 font-bold text-sm">
+              {knowledge ? `${compactNumber(knowledge.index.chunks)} chunks · ${compactNumber(knowledge.index.characters)} chars` : '—'}
+            </span>
           </div>
-          <div className="bg-[#0A0F1D]/80 border border-[#1C2740] rounded-lg px-3 py-2">
-            <span className="text-slate-400 text-[10px] block">COMMUNICATION ENGINE</span>
-            <span className="text-purple-300 font-bold text-sm">Gemini 3.8 Flash</span>
+          <div className="bg-[#0A0F1D]/80 border border-[#1C2740] rounded-lg px-3 py-2" title="The model currently answering. Falls back to the offline core if it is unreachable.">
+            <span className="text-slate-400 text-[10px] block">LANGUAGE MODEL</span>
+            <span className={`font-bold text-sm ${activeModel ? 'text-purple-300' : 'text-amber-300'}`}>
+              {activeModel === undefined ? '—' : (activeModel ?? 'offline core only')}
+            </span>
           </div>
         </div>
       </div>
@@ -153,7 +206,7 @@ export const AngelCommunicationTuning: React.FC<AngelCommunicationTuningProps> =
           <div className="flex items-center gap-2">
             <Layers className="w-4 h-4 text-cyan-400" />
             <h4 className="text-sm font-bold text-white font-mono uppercase tracking-wider">
-              Communication Corpus — 5 Knowledge Volumes
+              Written communication volumes ({COMMUNICATION_VOLUME_COUNT})
             </h4>
           </div>
           <span className="text-xs text-slate-400 font-mono hidden sm:inline">

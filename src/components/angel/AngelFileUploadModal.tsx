@@ -218,7 +218,9 @@ export const AngelFileUploadModal: React.FC<AngelFileUploadModalProps> = ({
         setCopiedHash(true);
         setTimeout(() => setCopiedHash(false), 2000);
       }
-    } catch {}
+    } catch (error) {
+      console.warn('Clipboard copy of the checksum failed:', error);
+    }
   };
 
   if (!isOpen) return null;

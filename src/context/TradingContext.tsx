@@ -26,6 +26,7 @@ import { soundAlertService } from '../utils/audioAlerts';
 import { saveMemoriesToIndexedDb, loadMemoriesFromIndexedDb } from '../utils/indexedDbStorage';
 import { INITIAL_ANGEL_PROJECTS } from '../data/angelProjects';
 import { INITIAL_GOLD_MEMORIES, mergeAllMemoriesIntoAngelX, ANGEL_X_MASTER_FILE } from '../data/goldMemoryData';
+import { readJson, readString, writeJson, writeString, removeKey } from '../utils/safeStorage';
 import { INITIAL_INSTRUMENTS } from '../data/instruments';
 import { getDominionTimeframe } from '../data/timeframes';
 import { generateCandles, calculateMultiTimeframeMetrics } from '../utils/technicalAnalysis';
@@ -236,6 +237,8 @@ interface TradingContextType {
   toggleGoldMemoryActive: (id: string) => void;
   clearAllGoldMemories: () => void;
   consolidateAllIntoAngelX: () => void;
+  /** Re-pull the authoritative document index from the server store. */
+  syncMemoriesWithServer: () => Promise<void>;
   downloadAngelPackage: () => Promise<boolean>;
   isDownloadingAngel: boolean;
 
@@ -411,14 +414,10 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [marketStatus, setMarketStatus] = useState<'OPEN' | 'CLOSED'>('CLOSED');
   const [marketClosureReason, setMarketClosureReason] = useState<string | null>('Global Weekend Close');
   const [goldApiKey, setGoldApiKeyState] = useState<string>(() => {
-    try {
-      const saved = localStorage.getItem(GOLD_API_KEY_STORAGE);
-      if (saved && saved.trim() !== '' && saved !== 'goldapi-5403d0e1a666c2c6afa359500f9588c3-io') {
-        return saved.trim();
-      }
-      localStorage.setItem(GOLD_API_KEY_STORAGE, 'goldapi-6410205ba00b5b7e0e906a891b7bd316-io');
-    } catch {}
-    return 'goldapi-6410205ba00b5b7e0e906a891b7bd316-io';
+    // Empty by default. A key committed in source is a key that leaks; the
+    // user supplies their own through the GoldAPI settings modal, and the app
+    // falls back to the free public spot feed when there is none.
+    return localStorage.getItem(GOLD_API_KEY_STORAGE) || '';
   });
 
   // Internet Connection & Network Monitoring
@@ -650,21 +649,14 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const ANGEL_ACTIVE_PROJECT_KEY = 'scalp_angel_active_project_id_v2';
 
   const [projects, setProjects] = useState<AngelProject[]>(() => {
-    try {
-      const saved = localStorage.getItem(ANGEL_PROJECTS_STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    } catch {}
+    const saved = readJson<AngelProject[] | null>(ANGEL_PROJECTS_STORAGE_KEY, null, Array.isArray);
+    if (saved && saved.length > 0) return saved;
     return INITIAL_ANGEL_PROJECTS;
   });
 
   const [activeProjectId, setActiveProjectId] = useState<string>(() => {
-    try {
-      const saved = localStorage.getItem(ANGEL_ACTIVE_PROJECT_KEY);
-      if (saved) return saved;
-    } catch {}
+    const saved = readString(ANGEL_ACTIVE_PROJECT_KEY);
+    if (saved) return saved;
     return INITIAL_ANGEL_PROJECTS[0].id;
   });
 
@@ -674,9 +666,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const setActiveProject = useCallback((proj: AngelProject) => {
     setActiveProjectId(proj.id);
-    try {
-      localStorage.setItem(ANGEL_ACTIVE_PROJECT_KEY, proj.id);
-    } catch {}
+    writeString(ANGEL_ACTIVE_PROJECT_KEY, proj.id);
   }, []);
 
   const addProject = useCallback((newProjData: Omit<AngelProject, 'id' | 'createdDate'>) => {
@@ -687,24 +677,18 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
     setProjects(prev => {
       const updated = [newProject, ...prev];
-      try {
-        localStorage.setItem(ANGEL_PROJECTS_STORAGE_KEY, JSON.stringify(updated));
-      } catch {}
+      writeJson(ANGEL_PROJECTS_STORAGE_KEY, updated);
       return updated;
     });
     setActiveProjectId(newProject.id);
-    try {
-      localStorage.setItem(ANGEL_ACTIVE_PROJECT_KEY, newProject.id);
-    } catch {}
+    writeString(ANGEL_ACTIVE_PROJECT_KEY, newProject.id);
     return newProject;
   }, []);
 
   const updateProject = useCallback((updatedProject: AngelProject) => {
     setProjects(prev => {
       const updated = prev.map(p => p.id === updatedProject.id ? updatedProject : p);
-      try {
-        localStorage.setItem(ANGEL_PROJECTS_STORAGE_KEY, JSON.stringify(updated));
-      } catch {}
+      writeJson(ANGEL_PROJECTS_STORAGE_KEY, updated);
       return updated;
     });
   }, []);
@@ -713,16 +697,12 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setProjects(prev => {
       const filtered = prev.filter(p => p.id !== id);
       const finalProjects = filtered.length > 0 ? filtered : INITIAL_ANGEL_PROJECTS;
-      try {
-        localStorage.setItem(ANGEL_PROJECTS_STORAGE_KEY, JSON.stringify(finalProjects));
-      } catch {}
+      writeJson(ANGEL_PROJECTS_STORAGE_KEY, finalProjects);
       return finalProjects;
     });
     if (activeProjectId === id) {
       setActiveProjectId(INITIAL_ANGEL_PROJECTS[0].id);
-      try {
-        localStorage.setItem(ANGEL_ACTIVE_PROJECT_KEY, INITIAL_ANGEL_PROJECTS[0].id);
-      } catch {}
+      writeString(ANGEL_ACTIVE_PROJECT_KEY, INITIAL_ANGEL_PROJECTS[0].id);
     }
   }, [activeProjectId]);
 
@@ -735,16 +715,21 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          // If already consolidated to single file ANGEL X:
-          if (parsed.length === 1 && (parsed[0].id === 'angel-x' || parsed[0].fileName === 'ANGEL X')) {
-            return [parsed[0]];
-          }
-          // Merge all existing / legacy items into the single master file ANGEL X
-          const consolidated = mergeAllMemoriesIntoAngelX(parsed);
-          return [consolidated];
+          // Documents are kept as separate items on purpose.
+          //
+          // The previous version collapsed every memory into one giant "ANGEL X"
+          // blob on load. That destroyed per-document identity, so retrieval
+          // could never cite a source, deleting one upload was impossible, and
+          // the blob grew past what could be sent to the model — which is why
+          // ANGEL kept "forgetting" files that had definitely been uploaded.
+          // Consolidation is still available, but only as an explicit export
+          // action (consolidateAllIntoAngelX), never silently on load.
+          return parsed;
         }
       }
-    } catch {}
+    } catch (error) {
+      console.warn('Could not read stored memories, starting from defaults:', error);
+    }
     return INITIAL_GOLD_MEMORIES;
   });
 
@@ -776,22 +761,114 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           tags: m.tags,
           content: m.content ? m.content.slice(0, 500) + '...' : ''
         }));
-        localStorage.setItem(ANGEL_GOLD_MEMORIES_STORAGE_KEY, JSON.stringify(minimal));
-      } catch {}
+        if (!writeJson(ANGEL_GOLD_MEMORIES_STORAGE_KEY, minimal)) {
+          // Even the index does not fit. IndexedDB and the server store still
+          // hold the documents; only the instant-load cache is lost.
+          console.error(
+            '[storage] Could not persist even the document index to localStorage. ' +
+              'Documents remain in IndexedDB and on the server, but this browser will load them more slowly.',
+          );
+        }
+      } catch (indexError) {
+        console.error('[storage] Failed to build the lightweight document index:', indexError);
+      }
     }
   }, []);
 
-  // Hydrate high-capacity memories from IndexedDB on initial mount and consolidate into single ANGEL X file
-  useEffect(() => {
-    loadMemoriesFromIndexedDb().then((idbMemories) => {
-      setGoldMemories(prev => {
-        const pool = [...prev, ...(Array.isArray(idbMemories) ? idbMemories : [])];
-        const consolidated = mergeAllMemoriesIntoAngelX(pool);
-        safePersistMemories([consolidated]);
-        return [consolidated];
+  // Hydrate full-text memories from IndexedDB (localStorage only holds a
+  // truncated index) and merge them with anything already in state, keeping
+  // each document separate and deduplicating by id.
+  const syncMemoriesWithServer = useCallback(async () => {
+    {
+      const [idbMemories, serverResponse] = await Promise.all([
+        loadMemoriesFromIndexedDb().catch(() => [] as GoldMemoryItem[]),
+        // The server store is now the authoritative copy. Pull its index so a
+        // fresh browser still sees every document the user has uploaded.
+        fetch('/api/angel/memories')
+          .then((response) => (response.ok ? response.json() : null))
+          .catch(() => null),
+      ]);
+      const serverDocuments: GoldMemoryItem[] = Array.isArray(serverResponse?.documents)
+        ? serverResponse.documents.map((document: any) => ({
+            id: document.id,
+            title: document.title,
+            category: document.category ?? 'UPLOADED_DOC',
+            // Full text stays on the server; it is fetched on demand and used
+            // for retrieval there, so the browser never holds the whole corpus.
+            content:
+              typeof document.preview === 'string' && document.preview.length > 0
+                ? `${document.preview}${(document.characters ?? 0) > document.preview.length ? `\n\n[…${((document.characters ?? 0) - document.preview.length).toLocaleString()} more characters stored on the server. ANGEL searches the full text there.]` : ''}${document.extractionNote ? `\n\nExtraction note: ${document.extractionNote}` : ''}`
+                : `[Stored on server · ${(document.characters ?? 0).toLocaleString()} characters. ANGEL reads the full text server-side.]${document.extractionNote ? `\n${document.extractionNote}` : ''}`,
+            sourceType: document.sourceType ?? 'FILE_UPLOAD',
+            fileName: document.fileName,
+            fileSize: `${(document.characters ?? 0).toLocaleString()} chars`,
+            fileType: document.fileType,
+            createdAt: document.createdAt ?? Date.now(),
+            updatedAt: document.updatedAt ?? Date.now(),
+            isActive: document.isActive !== false,
+            tags: document.tags ?? [],
+          }))
+        : [];
+
+      setGoldMemories((previous) => {
+        const byId = new Map<string, GoldMemoryItem>();
+        for (const memory of [...previous, ...(Array.isArray(idbMemories) ? idbMemories : []), ...serverDocuments]) {
+          if (!memory?.id) continue;
+          const existing = byId.get(memory.id);
+          // Prefer whichever copy actually carries the longer content.
+          if (!existing || (memory.content?.length ?? 0) > (existing.content?.length ?? 0)) {
+            byId.set(memory.id, memory);
+          }
+        }
+        const merged = [...byId.values()].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+        safePersistMemories(merged);
+
+        // One-way migration: anything that exists only in this browser is
+        // pushed up so the server store holds every document. After this the
+        // chat request no longer has to carry the corpus in its body.
+        const serverIds = new Set(serverDocuments.map((document) => document.id));
+        const pending = merged.filter(
+          (memory) =>
+            !serverIds.has(memory.id) &&
+            typeof memory.content === 'string' &&
+            memory.content.trim().length > 40 &&
+            !memory.content.startsWith('[Stored on server'),
+        );
+        if (pending.length > 0) {
+          void (async () => {
+            for (const memory of pending.slice(0, 200)) {
+              try {
+                await fetch('/api/angel/memories', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    id: memory.id,
+                    title: memory.title,
+                    content: memory.content,
+                    category: memory.category,
+                    sourceType: memory.sourceType,
+                    fileName: memory.fileName,
+                    tags: memory.tags,
+                    isActive: memory.isActive !== false,
+                  }),
+                });
+              } catch {
+                // Offline or server down: the browser copy is still intact and
+                // the migration retries on the next load.
+                break;
+              }
+            }
+          })();
+        }
+
+        return merged;
       });
-    }).catch(() => {});
+    }
   }, [safePersistMemories]);
+
+  useEffect(() => {
+    syncMemoriesWithServer().catch((error) => console.warn('Memory hydration failed:', error));
+  }, [syncMemoriesWithServer]);
 
   const addGoldMemory = useCallback((itemData: (Omit<GoldMemoryItem, 'id' | 'createdAt' | 'updatedAt'> & { id?: string; createdAt?: number; updatedAt?: number })) => {
     if (itemData.id === 'angel-x' || itemData.fileName === 'ANGEL X') {
@@ -860,9 +937,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const toggleGoldMemoryActive = useCallback((id: string) => {
     setGoldMemories(prev => {
       const updated = prev.map(m => m.id === id ? { ...m, isActive: !m.isActive, updatedAt: Date.now() } : m);
-      try {
-        localStorage.setItem(ANGEL_GOLD_MEMORIES_STORAGE_KEY, JSON.stringify(updated));
-      } catch {}
+      writeJson(ANGEL_GOLD_MEMORIES_STORAGE_KEY, updated);
       return updated;
     });
   }, []);
@@ -933,13 +1008,8 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   // Price Alert System State & Methods
   const [priceAlerts, setPriceAlerts] = useState<PriceAlert[]>(() => {
-    try {
-      const saved = localStorage.getItem(PRICE_ALERTS_STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    } catch {}
+    const saved = readJson<PriceAlert[] | null>(PRICE_ALERTS_STORAGE_KEY, null, Array.isArray);
+    if (saved && saved.length > 0) return saved;
     const defaultSpot = INITIAL_INSTRUMENTS[0].currentPrice || 3018.5;
     return [
       {
@@ -979,9 +1049,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
     setPriceAlerts(prev => {
       const updated = [newAlert, ...prev];
-      try {
-        localStorage.setItem(PRICE_ALERTS_STORAGE_KEY, JSON.stringify(updated));
-      } catch {}
+      writeJson(PRICE_ALERTS_STORAGE_KEY, updated);
       return updated;
     });
     return newAlert;
@@ -990,9 +1058,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const removePriceAlert = useCallback((id: string) => {
     setPriceAlerts(prev => {
       const updated = prev.filter(a => a.id !== id);
-      try {
-        localStorage.setItem(PRICE_ALERTS_STORAGE_KEY, JSON.stringify(updated));
-      } catch {}
+      writeJson(PRICE_ALERTS_STORAGE_KEY, updated);
       return updated;
     });
   }, []);
@@ -1006,9 +1072,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
         return a;
       });
-      try {
-        localStorage.setItem(PRICE_ALERTS_STORAGE_KEY, JSON.stringify(updated));
-      } catch {}
+      writeJson(PRICE_ALERTS_STORAGE_KEY, updated);
       return updated;
     });
   }, []);
@@ -1028,9 +1092,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
         return a;
       });
-      try {
-        localStorage.setItem(PRICE_ALERTS_STORAGE_KEY, JSON.stringify(updated));
-      } catch {}
+      writeJson(PRICE_ALERTS_STORAGE_KEY, updated);
       return updated;
     });
   }, [instruments, activeInstrument]);
@@ -1038,18 +1100,14 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const clearTriggeredAlerts = useCallback(() => {
     setPriceAlerts(prev => {
       const updated = prev.filter(a => a.status !== 'TRIGGERED');
-      try {
-        localStorage.setItem(PRICE_ALERTS_STORAGE_KEY, JSON.stringify(updated));
-      } catch {}
+      writeJson(PRICE_ALERTS_STORAGE_KEY, updated);
       return updated;
     });
   }, []);
 
   const clearAllPriceAlerts = useCallback(() => {
     setPriceAlerts([]);
-    try {
-      localStorage.removeItem(PRICE_ALERTS_STORAGE_KEY);
-    } catch {}
+    removeKey(PRICE_ALERTS_STORAGE_KEY);
   }, []);
 
   const dismissAlertToast = useCallback((id: string) => {
@@ -1723,9 +1781,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
             }
             return a;
           });
-          try {
-            localStorage.setItem(PRICE_ALERTS_STORAGE_KEY, JSON.stringify(updated));
-          } catch {}
+          writeJson(PRICE_ALERTS_STORAGE_KEY, updated);
           return updated;
         });
 
@@ -2045,6 +2101,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     toggleGoldMemoryActive,
     clearAllGoldMemories,
     consolidateAllIntoAngelX,
+    syncMemoriesWithServer,
     downloadAngelPackage,
     isDownloadingAngel,
     // Price Alert System

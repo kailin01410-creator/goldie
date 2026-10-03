@@ -663,6 +663,46 @@ export interface AngelProject {
   createdDate: string;
 }
 
+/**
+ * Where a claim in an ANGEL reply came from. Mirrors the `citations` array
+ * returned by POST /api/angel/chat so the UI can show its working.
+ */
+export interface AngelCitation {
+  /** Document title. */
+  title: string;
+  /** Original file name, when the document came from an upload. */
+  fileName?: string;
+  /** Retrieval score (higher is a stronger match). */
+  score: number;
+  /** Which corpus it came from, e.g. USER_UPLOAD or BUILTIN_FINANCE. */
+  source?: string;
+  /** Heading of the matched chunk, when the document had one. */
+  heading?: string;
+  /** Short quoted fragment so the user can verify without opening the file. */
+  snippet?: string;
+}
+
+/**
+ * A calculation ANGEL performed in TypeScript rather than trusting the model's
+ * arithmetic. Mirrors DetectedCalculation on the server.
+ */
+export interface AngelCalculationTrace {
+  tool: string;
+  confidence: number;
+  reason: string;
+  /** Present when the message carried enough numbers to actually compute. */
+  result?: {
+    tool: string;
+    title: string;
+    headline: string;
+    steps: { label: string; expression?: string; value: string }[];
+    outputs: Record<string, number | string>;
+    notes?: string[];
+  };
+  /** What is still missing, when the computation could not run. */
+  missing?: string[];
+}
+
 export interface AngelChatMessage {
   id: string;
   sender: 'user' | 'angel';
@@ -676,6 +716,22 @@ export interface AngelChatMessage {
     riskScore?: number;
     actionableAdvice?: string;
     memoriesRead?: number;
+    /** 'model' when the LLM answered, 'offline-core' when it could not. */
+    source?: 'model' | 'offline-core';
+    model?: string;
+    /** True when the model was unreachable and the offline core replied. */
+    degraded?: boolean;
+    degradedReason?: string;
+    latencyMs?: number;
+    documentsSearched?: number;
+    documentsUsed?: number;
+    language?: 'en' | 'tl' | 'taglish';
+    citations?: AngelCitation[];
+    calculations?: AngelCalculationTrace[];
+    /** Feedback the user already gave on this message. */
+    feedback?: 'UP' | 'DOWN';
+    /** What ANGEL changed in response to that feedback. */
+    feedbackAdjustment?: string;
   };
 }
 
