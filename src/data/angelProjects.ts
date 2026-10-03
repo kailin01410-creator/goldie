@@ -231,4 +231,14 @@ export const CONVERSATIONAL_STARTERS = [
     label: 'Gratitude & Encouragement',
     prompt: 'Thank you for your dedicated companionship, ANGEL. Your support means a lot to my trading journey.',
   },
+  {
+    category: 'CODING_AI',
+    label: 'Google AI Studio Code Doctor',
+    prompt: 'ANGEL, please act as a Google AI Studio Principal Engineer and help me diagnose and fix all coding errors.',
+  },
+  {
+    category: 'INTELLECT',
+    label: 'Absorb Files & Expand Intellect',
+    prompt: 'ANGEL, please read my uploaded files, add them to your core storage, and explain what has been added to your intellect.',
+  },
 ];

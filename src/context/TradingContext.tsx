@@ -447,11 +447,14 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setCandles(generateCandles(effectivePrice, 200, undefined, timeframe));
   }, [instruments, timeframe, activeSymbol]);
 
-  const setTimeframe = useCallback((tf: TimeframeId) => {
-    setTimeframeState(tf);
-    const target = instruments.find(i => i.symbol === activeSymbol) || instruments[0];
-    const effectivePrice = realMarketPriceRef.current || target.currentPrice;
-    setCandles(generateCandles(effectivePrice, 200, undefined, tf));
+  const setTimeframe = useCallback((tfOrUpdater: TimeframeId | ((prev: TimeframeId) => TimeframeId)) => {
+    setTimeframeState(prevTf => {
+      const nextTf = typeof tfOrUpdater === 'function' ? tfOrUpdater(prevTf) : tfOrUpdater;
+      const target = instruments.find(i => i.symbol === activeSymbol) || instruments[0];
+      const effectivePrice = realMarketPriceRef.current || target.currentPrice;
+      setCandles(generateCandles(effectivePrice, 200, undefined, nextTf));
+      return nextTf;
+    });
   }, [instruments, activeSymbol]);
 
   // Strategy Dashboard & Persistence Configuration
@@ -867,34 +870,49 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     syncMemoriesWithServer().catch((error) => console.warn('Memory hydration failed:', error));
   }, [syncMemoriesWithServer]);
 
-  const addGoldMemory = useCallback((itemData: Omit<GoldMemoryItem, 'id' | 'createdAt' | 'updatedAt'>) => {
+  const addGoldMemory = useCallback((itemData: (Omit<GoldMemoryItem, 'id' | 'createdAt' | 'updatedAt'> & { id?: string; createdAt?: number; updatedAt?: number })) => {
+    if (itemData.id === 'angel-x' || itemData.fileName === 'ANGEL X') {
+      const updatedMaster: GoldMemoryItem = {
+        ...ANGEL_X_MASTER_FILE,
+        ...itemData,
+        id: 'angel-x',
+        title: 'ANGEL X',
+        fileName: 'ANGEL X',
+        createdAt: itemData.createdAt || Date.now(),
+        updatedAt: Date.now(),
+      };
+      setGoldMemories([updatedMaster]);
+      safePersistMemories([updatedMaster]);
+      return updatedMaster;
+    }
+
     const newItem: GoldMemoryItem = {
       ...itemData,
-      id: `mem-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-      createdAt: Date.now(),
+      id: itemData.id || `mem-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      createdAt: itemData.createdAt || Date.now(),
       updatedAt: Date.now(),
     };
     setGoldMemories(prev => {
-      const updated = [newItem, ...prev];
-      safePersistMemories(updated);
-      return updated;
+      const consolidated = mergeAllMemoriesIntoAngelX([newItem, ...prev]);
+      safePersistMemories([consolidated]);
+      return [consolidated];
     });
     return newItem;
   }, [safePersistMemories]);
 
-  const addGoldMemoriesBatch = useCallback((itemsData: Omit<GoldMemoryItem, 'id' | 'createdAt' | 'updatedAt'>[]) => {
+  const addGoldMemoriesBatch = useCallback((itemsData: (Omit<GoldMemoryItem, 'id' | 'createdAt' | 'updatedAt'> & { id?: string; createdAt?: number; updatedAt?: number })[]) => {
     if (!itemsData || itemsData.length === 0) return [];
     const newItems: GoldMemoryItem[] = itemsData.map((itemData, idx) => ({
       ...itemData,
-      id: `mem-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 7)}`,
-      createdAt: Date.now() + idx,
+      id: itemData.id || `mem-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 7)}`,
+      createdAt: itemData.createdAt || (Date.now() + idx),
       updatedAt: Date.now() + idx,
     }));
 
     setGoldMemories(prev => {
-      const updated = [...newItems, ...prev];
-      safePersistMemories(updated);
-      return updated;
+      const consolidated = mergeAllMemoriesIntoAngelX([...newItems, ...prev]);
+      safePersistMemories([consolidated]);
+      return [consolidated];
     });
 
     return newItems;
@@ -1396,15 +1414,16 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           realMarketPriceRef.current = livePrice;
           setInstruments(prev => prev.map(inst => {
             if (inst.symbol === activeInstrument.symbol) {
-              // Raw market quotes: spread decoupled
-              const newBid = livePrice;
-              const newAsk = livePrice;
-              const openPrice = data.open24h ? Number(data.open24h) : (inst.open24h || livePrice * 0.998);
-              const finalChangePercent = data.changePercent !== undefined
+              const newBid = data.bid ? Number(data.bid) : Number((livePrice - 0.20).toFixed(inst.decimals));
+              const newAsk = data.ask ? Number(data.ask) : Number((livePrice + 0.20).toFixed(inst.decimals));
+              const openPrice = data.open24h && Number(data.open24h) > 0
+                ? Number(data.open24h)
+                : (inst.open24h || Number((livePrice * 0.9976).toFixed(inst.decimals)));
+              const finalChangePercent = data.changePercent !== undefined && data.changePercent !== null && Number(data.changePercent) !== 0
                 ? Number(data.changePercent)
                 : Number((((livePrice - openPrice) / openPrice) * 100).toFixed(2));
-              const finalChangePips = data.change !== undefined
-                ? Number((data.change * inst.pipMultiplier).toFixed(1))
+              const finalChangePips = data.change !== undefined && data.change !== null && Number(data.change) !== 0
+                ? Number((Number(data.change) * inst.pipMultiplier).toFixed(1))
                 : Number(((livePrice - openPrice) * inst.pipMultiplier).toFixed(1));
 
               return {
@@ -1413,7 +1432,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 open24h: openPrice,
                 bid: newBid,
                 ask: newAsk,
-                spreadPips: 0.0,
+                spreadPips: Number(((newAsk - newBid) * inst.pipMultiplier).toFixed(1)),
                 high24h: data.high24h ? Number(data.high24h) : Math.max(inst.high24h, livePrice),
                 low24h: data.low24h ? Number(data.low24h) : Math.min(inst.low24h, livePrice),
                 change24h: finalChangePercent,
@@ -1434,7 +1453,8 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
           // Calibrate candles around active instrument's live price
           setCandles(prev => {
-            if (prev.length === 0 || Math.abs(prev[prev.length - 1].close - livePrice) / livePrice > 0.05) {
+            // If empty or if last bar close diverges > 0.5% from real live price, regenerate full 200 bars contiguously
+            if (prev.length === 0 || Math.abs(prev[prev.length - 1].close - livePrice) / livePrice > 0.005) {
               return generateCandles(livePrice, 200, undefined, timeframe);
             }
             const last = { ...prev[prev.length - 1] };

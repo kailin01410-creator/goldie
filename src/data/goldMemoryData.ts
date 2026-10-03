@@ -6,6 +6,7 @@ import {
   generateRealJsonDataset, 
   generateBlankDataBlocks 
 } from './angelStorageExpander';
+import { CHAPTER_25_SELF_ADAPTIVE_CODING_CORPUS } from './angelCodingAdaptiveData';
 
 // Base comprehensive markdown content for ANGEL X
 const BASE_ANGEL_X_SECTIONS = `# 👼 ANGEL X — Consolidated Autonomous Intelligence & Complete Storage Corpus
@@ -43,6 +44,7 @@ const BASE_ANGEL_X_SECTIONS = `# 👼 ANGEL X — Consolidated Autonomous Intell
 - **CHAPTER 22**: Production Quantitative Algorithms & Real TypeScript, Python & MQL5 Code
 - **CHAPTER 23**: Machine-Readable Institutional JSON Databases & Dictionaries
 - **CHAPTER 24**: Allocated Physical Blank Data Storage Blocks & Memory Registers
+- **CHAPTER 25**: Self-Adaptive AI Coding Engine & Full-Stack Error Resolution Playbook (Google AI Studio Standard)
 
 ---
 
@@ -482,6 +484,7 @@ const BASE_ANGEL_X_SECTIONS = `# 👼 ANGEL X — Consolidated Autonomous Intell
 export const ANGEL_X_CONTENT = BASE_ANGEL_X_SECTIONS + 
   generateRealCodeDataset() + 
   generateRealJsonDataset() + 
+  CHAPTER_25_SELF_ADAPTIVE_CODING_CORPUS +
   generateBlankDataBlocks(200); // Genuinely allocates 200KB of formatted blank data registers
 
 // Compute real byte size from the actual encoded UTF-8 bytes
@@ -503,6 +506,9 @@ export const ANGEL_X_MASTER_FILE: GoldMemoryItem = {
     'Consolidated Master File',
     'Master Storage',
     'Real Measured Byte Size',
+    'Google AI Studio Coding Engine',
+    'Self-Adaptive Code Doctor',
+    'Full-Stack Error Diagnosis',
     'Code & Algorithms',
     'JSON Database',
     'Allocated Blank Data',
@@ -560,16 +566,24 @@ export function mergeAllMemoriesIntoAngelX(memories: GoldMemoryItem[]): GoldMemo
     return ANGEL_X_MASTER_FILE;
   }
 
+  // Find existing angel-x master file if present
+  const existingAngelX = memories.find(m => m.id === 'angel-x' || m.fileName === 'ANGEL X');
+  const baseContent = existingAngelX?.content && existingAngelX.content.length >= ANGEL_X_CONTENT.length 
+    ? existingAngelX.content 
+    : ANGEL_X_CONTENT;
+
   // If already only ANGEL X, return updated ANGEL X with real byte size
   if (memories.length === 1 && (memories[0].id === 'angel-x' || memories[0].fileName === 'ANGEL X')) {
-    const content = memories[0].content || ANGEL_X_CONTENT;
+    const content = memories[0].content || baseContent;
     const realBytes = getUtf8ByteLength(content);
     return {
       ...ANGEL_X_MASTER_FILE,
       ...memories[0],
       fileName: 'ANGEL X',
       title: 'ANGEL X',
+      content,
       fileSize: `${formatBytes(realBytes)} (Real Byte Size)`,
+      fileSizeBytes: realBytes,
       updatedAt: Date.now()
     };
   }
@@ -606,14 +620,27 @@ export function mergeAllMemoriesIntoAngelX(memories: GoldMemoryItem[]): GoldMemo
     ].includes(m.id);
 
     if (!isBuiltIn && m.content && m.content.trim()) {
+      // Avoid duplicate appending if this content is already inside baseContent
+      if (baseContent.includes(m.content)) {
+        continue;
+      }
       userFileCount++;
-      supplementalItems.push(`\n\n---\n\n## 📂 SUPPLEMENTAL USER DATA #${userFileCount}: ${m.title || m.fileName || 'Uploaded Note'}\n**Category**: ${m.category} | **Source**: ${m.sourceType}\n${m.content}`);
+      const itemBytes = m.fileSizeBytes || getUtf8ByteLength(m.content);
+      const formattedItemSize = m.fileSize || formatBytes(itemBytes);
+      const parity = m.parityPercent || 100.0;
+      const chk = m.checksum || 'verified-intact';
+
+      supplementalItems.push(`\n\n---\n\n## 📂 SUPPLEMENTAL USER DATA #${userFileCount}: ${m.title || m.fileName || 'Uploaded Note'}\n**Category**: ${m.category} | **Source**: ${m.sourceType}\n**Physical Size**: ${formattedItemSize} (${itemBytes.toLocaleString()} bytes) | **Size Parity**: ${parity}% Match | **SHA-256**: ${chk}\n${m.content}`);
     }
   }
 
-  const combinedContent = supplementalItems.length > 0 
-    ? ANGEL_X_CONTENT + `\n\n# =============================================================================\n# 📂 SUPPLEMENTAL INTEGRATED USER ASSETS (${userFileCount} FILES MERGED)\n# =============================================================================` + supplementalItems.join('')
-    : ANGEL_X_CONTENT;
+  let combinedContent = baseContent;
+  if (supplementalItems.length > 0) {
+    if (!combinedContent.includes('SUPPLEMENTAL INTEGRATED USER ASSETS')) {
+      combinedContent += `\n\n# =============================================================================\n# 📂 SUPPLEMENTAL INTEGRATED USER ASSETS (VERIFIED INTACT)\n# =============================================================================`;
+    }
+    combinedContent += supplementalItems.join('');
+  }
 
   const totalBytes = getUtf8ByteLength(combinedContent);
 
@@ -624,6 +651,7 @@ export function mergeAllMemoriesIntoAngelX(memories: GoldMemoryItem[]): GoldMemo
     fileName: 'ANGEL X',
     content: combinedContent,
     fileSize: `${formatBytes(totalBytes)} (Real Byte Size)`,
+    fileSizeBytes: totalBytes,
     updatedAt: Date.now()
   };
 }

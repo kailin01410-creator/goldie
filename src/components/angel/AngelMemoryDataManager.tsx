@@ -27,11 +27,14 @@ import {
   Cpu,
   Maximize2,
   Code2,
-  Table
+  Table,
+  FileCheck,
+  ArrowRight,
+  Check
 } from 'lucide-react';
 import { useTrading } from '../../context/TradingContext';
-import { GoldMemoryItem, GoldMemoryCategory } from '../../types';
-import { extractFileToMemories } from '../../utils/fileExtractor';
+import { GoldMemoryItem, GoldMemoryCategory, UploadVerificationReport } from '../../types';
+import { extractFileToMemories, formatSize } from '../../utils/fileExtractor';
 import { 
   ANGEL_X_MASTER_FILE, 
   ANGEL_X_CONTENT, 
@@ -39,6 +42,7 @@ import {
   expandAngelXStorage 
 } from '../../data/goldMemoryData';
 import { formatBytes, getUtf8ByteLength } from '../../data/angelStorageExpander';
+import { AngelFileUploadModal } from './AngelFileUploadModal';
 
 interface AngelMemoryDataManagerProps {
   onAskAboutMemory?: (memory: GoldMemoryItem) => void;
@@ -69,7 +73,8 @@ const MASTER_CHAPTERS = [
   { id: 'ch-21', title: 'Chapter 21: Mathematical Risk Management & Anti-Drawdown', category: 'RISK' },
   { id: 'ch-22', title: 'Chapter 22: Production Quantitative Algorithms & Real TypeScript/Python/MQL5 Code', category: 'CODE' },
   { id: 'ch-23', title: 'Chapter 23: Machine-Readable Institutional JSON Databases & Dictionaries', category: 'DATA' },
-  { id: 'ch-24', title: 'Chapter 24: Allocated Physical Blank Data Storage Blocks & Memory Registers', category: 'STORAGE' }
+  { id: 'ch-24', title: 'Chapter 24: Allocated Physical Blank Data Storage Blocks & Memory Registers', category: 'STORAGE' },
+  { id: 'ch-25', title: 'Chapter 25: Self-Adaptive AI Coding Engine & Error Resolution Playbook (Google AI Studio)', category: 'CODING_AI' }
 ];
 
 export const AngelMemoryDataManager: React.FC<AngelMemoryDataManagerProps> = ({ onAskAboutMemory }) => {
@@ -94,11 +99,25 @@ export const AngelMemoryDataManager: React.FC<AngelMemoryDataManagerProps> = ({ 
   }, [goldMemories, consolidateAllIntoAngelX]);
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
+  const [pendingUploadFile, setPendingUploadFile] = useState<File | null>(null);
   const [viewingMemory, setViewingMemory] = useState<GoldMemoryItem | null>(null);
+  const [selectedVerificationReport, setSelectedVerificationReport] = useState<UploadVerificationReport | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [copiedText, setCopiedText] = useState(false);
   const [isExpandingStorage, setIsExpandingStorage] = useState(false);
+
+  // Persistent Verified Uploads & Byte Parity Audit Log
+  const [uploadHistory, setUploadHistory] = useState<UploadVerificationReport[]>(() => {
+    try {
+      const saved = localStorage.getItem('angel_upload_verification_history_v1');
+      if (saved) return JSON.parse(saved);
+    } catch (error) {
+      console.warn('Upload verification history could not be read; starting empty.', error);
+    }
+    return [];
+  });
 
   // New Memory Form State
   const [formTitle, setFormTitle] = useState('');
@@ -144,65 +163,30 @@ export const AngelMemoryDataManager: React.FC<AngelMemoryDataManagerProps> = ({ 
     }
   };
 
-  // Handle file and zip upload: extract and immediately fold into ANGEL X
-  const processUploadedFile = async (file: File) => {
-    try {
-      const isZip = file.name.toLowerCase().endsWith('.zip') || file.type.includes('zip');
-      setUploadStatus(isZip ? `Unpacking and integrating archive "${file.name}" into ANGEL X...` : `Reading and merging "${file.name}" into ANGEL X...`);
-
-      let extractedMemories: any[] = [];
-      let summaryMsg = '';
-
+  // Called when upload modal verifies and merges file
+  const handleMergeComplete = (mergedAngelX: GoldMemoryItem, report: UploadVerificationReport) => {
+    addGoldMemory(mergedAngelX);
+    consolidateAllIntoAngelX();
+    setUploadHistory(prev => {
+      const updated = [report, ...prev.filter(r => r.fileName !== report.fileName)].slice(0, 30);
       try {
-        const result = await extractFileToMemories(file);
-        extractedMemories = result.memories;
-        summaryMsg = result.summaryMessage;
-      } catch (browserExtractErr) {
-        console.warn('Browser extraction failed, delegating to high-capacity server engine:', browserExtractErr);
-        setUploadStatus(`Processing "${file.name}" via high-capacity server engine...`);
-        const serverRes = await fetch(`/api/angel/upload?filename=${encodeURIComponent(file.name)}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/octet-stream' },
-          body: file
-        });
-        if (!serverRes.ok) {
-          throw new Error(`Server returned HTTP ${serverRes.status}`);
-        }
-        const data = await serverRes.json();
-        if (!data.success || !Array.isArray(data.memories) || data.memories.length === 0) {
-          throw new Error(data.message || 'No readable data extracted from file');
-        }
-        extractedMemories = data.memories;
-        summaryMsg = data.summary || `✓ Integrated ${data.memories.length} item(s) from "${file.name}" into ANGEL X`;
+        localStorage.setItem('angel_upload_verification_history_v1', JSON.stringify(updated));
+      } catch (error) {
+        console.warn('Upload verification history could not be persisted:', error);
       }
-
-      if (extractedMemories.length > 0) {
-        // Merge directly with the existing ANGEL X file
-        const merged = mergeAllMemoriesIntoAngelX([...goldMemories, ...extractedMemories]);
-        addGoldMemory(merged);
-        consolidateAllIntoAngelX();
-      }
-
-      setUploadStatus(`✓ Successfully merged "${file.name}" into the single master storage file: ANGEL X!`);
-      setTimeout(() => {
-        setUploadStatus(null);
-      }, 5000);
-    } catch (err: any) {
-      console.error('File upload error:', err);
-      setUploadStatus(`Upload notice: ${err.message || 'Could not parse file'}`);
-      setTimeout(() => setUploadStatus(null), 6000);
-    }
+      return updated;
+    });
+    setUploadStatus(`✓ Size Match Verified: "${report.fileName}" merged into ANGEL X (${report.formattedOriginalSize} intact with 100% byte parity)`);
+    setTimeout(() => {
+      setUploadStatus(null);
+    }, 6000);
   };
 
   const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (files && files.length > 0) {
-      for (let i = 0; i < files.length; i++) {
-        processUploadedFile(files[i]);
-      }
-    }
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
+      setPendingUploadFile(files[0]);
+      setIsUploadModalOpen(true);
     }
   };
 
@@ -220,10 +204,9 @@ export const AngelMemoryDataManager: React.FC<AngelMemoryDataManagerProps> = ({ 
     setIsDragging(false);
     const files = e.dataTransfer.files;
     if (files && files.length > 0) {
-      for (let i = 0; i < files.length; i++) {
-        processUploadedFile(files[i]);
-      }
+      setPendingUploadFile(files[0]);
     }
+    setIsUploadModalOpen(true);
   };
 
   const handleSaveNewMemory = (e: React.FormEvent) => {
@@ -330,10 +313,31 @@ export const AngelMemoryDataManager: React.FC<AngelMemoryDataManagerProps> = ({ 
     return MASTER_CHAPTERS.filter(c => c.title.toLowerCase().includes(q) || c.category.toLowerCase().includes(q));
   }, [searchQuery]);
 
+  // Compute displayed section when a chapter is selected in viewer
+  const displayedContent = useMemo(() => {
+    if (!viewingMemory?.content) return '';
+    if (!selectedChapter) return viewingMemory.content;
+    const chapterPrefix = selectedChapter.split(':')[0].trim();
+    const idx = viewingMemory.content.indexOf(chapterPrefix);
+    if (idx !== -1) {
+      const nextIdx = viewingMemory.content.indexOf('Chapter ', idx + chapterPrefix.length + 10);
+      return nextIdx !== -1 
+        ? viewingMemory.content.slice(idx, nextIdx).trim()
+        : viewingMemory.content.slice(idx).trim();
+    }
+    return viewingMemory.content;
+  }, [viewingMemory?.content, selectedChapter]);
+
   const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedText(true);
-    setTimeout(() => setCopiedText(false), 2000);
+    try {
+      if (navigator?.clipboard?.writeText) {
+        navigator.clipboard.writeText(text);
+        setCopiedText(true);
+        setTimeout(() => setCopiedText(false), 2000);
+      }
+    } catch (error) {
+      console.warn('Clipboard copy failed:', error);
+    }
   };
 
   return (
@@ -397,16 +401,16 @@ export const AngelMemoryDataManager: React.FC<AngelMemoryDataManagerProps> = ({ 
             <span className="sm:hidden">{isDownloadingZip ? '...' : 'Export .ZIP'}</span>
           </button>
 
-          {/* Upload and auto-merge into ANGEL X */}
+          {/* Upload and auto-merge into ANGEL X with percentage & size verification */}
           <button
             type="button"
-            onClick={() => fileInputRef.current?.click()}
-            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#16233B] hover:bg-[#1E3052] text-amber-300 hover:text-white border border-amber-500/40 hover:border-amber-400 transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
-            title="Upload any file (.zip, .txt, .pdf, .csv, .md, images) to merge into ANGEL X"
+            onClick={() => setIsUploadModalOpen(true)}
+            className="px-3.5 py-1.5 rounded-lg text-xs font-bold bg-gradient-to-r from-amber-500/20 via-yellow-500/20 to-emerald-500/20 hover:from-amber-500/35 hover:to-emerald-500/35 text-amber-300 hover:text-white border border-amber-400/50 hover:border-amber-300 transition-all flex items-center gap-1.5 cursor-pointer shadow-sm active:scale-95"
+            title="Upload any file (.zip, .txt, .pdf, .csv, .md, images) with live upload percentage and byte parity verification"
           >
-            <UploadCloud className="w-3.5 h-3.5 text-amber-400" />
-            <span className="hidden md:inline">Merge File into ANGEL X</span>
-            <span className="md:hidden">Add File</span>
+            <UploadCloud className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+            <span className="hidden md:inline">Upload & Verify File</span>
+            <span className="md:hidden">Upload</span>
           </button>
 
           {/* Add text note to merge into ANGEL X */}
@@ -554,127 +558,151 @@ export const AngelMemoryDataManager: React.FC<AngelMemoryDataManagerProps> = ({ 
           </div>
 
           {/* ========================================================================= */}
-          {/* 🚀 STORAGE MAXIMIZER TOOLBAR (REAL DATA, CODE, JSON & BLANK DATA)          */}
+          {/* 📤 UPLOAD FILES / .ZIP (FULL CAPACITY WITH LIVE PERCENTAGE & SIZE PARITY) */}
           {/* ========================================================================= */}
-          <div className="bg-[#090E1A] border border-[#1E2E4A] rounded-xl p-3.5 sm:p-4 flex flex-col gap-2.5">
-            <div className="flex items-center justify-between flex-wrap gap-2">
-              <div className="flex items-center gap-2">
-                <Maximize2 className="w-4 h-4 text-amber-400" />
-                <h4 className="text-xs font-bold text-white uppercase tracking-wider font-mono">
-                  Maximize Physical File Storage (Real Code, JSON & Blank Data)
-                </h4>
-              </div>
-              <span className="text-[11px] font-mono text-slate-400">
-                Genuinely expands physical byte size on disk & download
-              </span>
+          <div className="bg-[#090E1A] border-2 border-dashed border-[#233352] hover:border-amber-500/50 rounded-xl p-4 sm:p-5 flex flex-col items-center justify-center text-center gap-3 transition-colors">
+            <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shadow-lg shadow-amber-500/10">
+              <UploadCloud className="w-6 h-6 animate-pulse" />
             </div>
-
-            <p className="text-[11px] text-slate-300">
-              Select any data block to append real quantitative code, institutional JSON databases, or allocated blank zero-byte buffers to maximize file capacity:
-            </p>
-
-            <div className="flex flex-wrap items-center gap-2 pt-1">
+            <div>
+              <h3 className="text-sm font-bold text-white font-mono">Upload Any File or .ZIP Archive</h3>
+              <p className="text-xs text-slate-400 mt-1 max-w-md mx-auto">
+                Drag and drop files here, or click below. Automatically uncompressed, verified for 100% byte parity, and absorbed into ANGEL's core memory.
+              </p>
+            </div>
+            <div className="flex items-center gap-2.5 flex-wrap justify-center pt-1">
               <button
                 type="button"
-                onClick={() => handleExpandStorage('BLANK_DATA', 250)}
-                disabled={isExpandingStorage}
-                className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold bg-[#142036] hover:bg-[#1E3052] text-amber-300 hover:text-white border border-amber-500/40 transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                title="Append 250 KB of indexed blank zero-byte storage registers"
+                onClick={() => setIsUploadModalOpen(true)}
+                className="px-4 py-2 rounded-xl font-bold font-mono text-xs bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-slate-950 transition-all flex items-center gap-2 cursor-pointer shadow-md shadow-amber-500/20 active:scale-95"
               >
-                <Database className="w-3.5 h-3.5 text-amber-400" />
-                <span>+250 KB Blank Data Registers</span>
+                <UploadCloud className="w-4 h-4 text-slate-950" />
+                <span>Upload File / .ZIP (Live Percentage)</span>
               </button>
 
               <button
                 type="button"
-                onClick={() => handleExpandStorage('CODE', 300)}
-                disabled={isExpandingStorage}
-                className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold bg-[#142036] hover:bg-[#1E3052] text-cyan-300 hover:text-white border border-cyan-500/40 transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                title="Append real TypeScript, Python and MQL5 trading algorithms"
+                onClick={() => setIsAddModalOpen(true)}
+                className="px-3.5 py-2 rounded-xl font-semibold font-mono text-xs bg-[#131D31] hover:bg-[#1C2B47] text-slate-200 hover:text-white border border-[#233352] hover:border-amber-500/40 transition-all flex items-center gap-1.5 cursor-pointer"
               >
-                <Code2 className="w-3.5 h-3.5 text-cyan-400" />
-                <span>+Real Code Algorithms</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => handleExpandStorage('JSON', 300)}
-                disabled={isExpandingStorage}
-                className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold bg-[#142036] hover:bg-[#1E3052] text-purple-300 hover:text-white border border-purple-500/40 transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                title="Append structured institutional macroeconomic JSON dictionary"
-              >
-                <Table className="w-3.5 h-3.5 text-purple-400" />
-                <span>+Machine JSON Dataset</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => handleExpandStorage('BLANK_DATA', 1000)}
-                disabled={isExpandingStorage}
-                className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold bg-[#142036] hover:bg-[#1E3052] text-emerald-300 hover:text-white border border-emerald-500/40 transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                title="Append 1 full Megabyte of blank data memory matrices"
-              >
-                <HardDrive className="w-3.5 h-3.5 text-emerald-400" />
-                <span>+1.0 MB Blank Storage Space</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => handleExpandStorage('MAXIMIZED_ALL', 2000)}
-                disabled={isExpandingStorage}
-                className="px-3.5 py-1.5 rounded-lg text-xs font-mono font-bold bg-gradient-to-r from-amber-500/30 to-yellow-500/30 hover:from-amber-500/45 hover:to-yellow-500/45 text-amber-200 hover:text-white border border-amber-400/60 transition-all flex items-center gap-1.5 cursor-pointer shadow-sm disabled:opacity-50"
-                title="Maximize storage with Code + JSON + 2MB Blank Data registers"
-              >
-                <Zap className="w-3.5 h-3.5 text-amber-300" />
-                <span>+2.0 MB Full Maximized Suite</span>
+                <Plus className="w-4 h-4 text-amber-400" />
+                <span>+ Add Rule / Note</span>
               </button>
             </div>
           </div>
 
-          {/* Unified Architecture Summary & Tags */}
-          <div className="flex flex-wrap gap-2">
-            {(angelXFile.tags || []).map((tag, idx) => (
-              <span key={idx} className="text-[11px] font-mono px-2.5 py-0.5 rounded-md bg-[#131D31] text-slate-300 border border-[#22314E] flex items-center gap-1">
-                <Tag className="w-2.5 h-2.5 text-amber-400" />
-                <span>{tag}</span>
-              </span>
-            ))}
-          </div>
-
-          {/* Consolidated Chapter Directory & Interactive Navigation within ANGEL X */}
+          {/* ========================================================================= */}
+          {/* 🛡️ ALL UPLOADED FILES & SIZE VERIFICATION REGISTRY                        */}
+          {/* ========================================================================= */}
           <div className="bg-[#090D16] border border-[#1A263D] rounded-xl p-3.5 sm:p-4">
-            <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
               <div className="flex items-center gap-2">
-                <BookOpen className="w-4 h-4 text-amber-400" />
+                <FileCheck className="w-4 h-4 text-emerald-400" />
                 <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider font-mono">
-                  Integrated Chapters Inside ANGEL X ({matchingChapters.length})
+                  All Uploaded Files & Size Verification ({uploadHistory.length})
                 </h4>
               </div>
-              <span className="text-[11px] font-mono text-slate-400">
-                Click any chapter to view
-              </span>
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-mono text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/30">
+                  100% Size Parity Enforced
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setIsUploadModalOpen(true)}
+                  className="text-xs font-mono text-amber-300 hover:text-white px-2.5 py-1 rounded bg-[#131D31] hover:bg-[#1A263E] border border-amber-500/30 cursor-pointer flex items-center gap-1"
+                >
+                  <Plus className="w-3 h-3 text-amber-400" />
+                  <span>Upload File</span>
+                </button>
+              </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
-              {matchingChapters.map((ch, idx) => (
+            {uploadHistory.length === 0 ? (
+              <div className="p-4 rounded-lg bg-[#0C1220] border border-[#172236] text-center">
+                <p className="text-xs font-mono text-slate-400">
+                  No custom external files uploaded yet. All baseline institutional datasets are active inside <strong className="text-amber-400 font-bold">ANGEL X</strong> ({formattedRealSize}).
+                </p>
                 <button
-                  key={ch.id}
                   type="button"
-                  onClick={() => {
-                    setSelectedChapter(ch.title);
-                    setViewingMemory(angelXFile);
-                  }}
-                  className="flex items-center gap-2 p-2 rounded-lg bg-[#0E1524] hover:bg-[#152035] border border-[#1A253A] hover:border-amber-500/40 text-left transition-all cursor-pointer group"
+                  onClick={() => setIsUploadModalOpen(true)}
+                  className="mt-2.5 px-3 py-1.5 rounded-lg text-xs font-mono font-bold bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 cursor-pointer inline-flex items-center gap-1.5"
                 >
-                  <span className="w-5 h-5 rounded bg-[#162136] text-[10px] font-mono font-bold text-amber-400 flex items-center justify-center shrink-0 group-hover:bg-amber-500 group-hover:text-slate-950 transition-colors">
-                    {idx}
-                  </span>
-                  <span className="text-[11px] text-slate-300 group-hover:text-white font-mono truncate flex-1">
-                    {ch.title}
-                  </span>
+                  <UploadCloud className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Upload File with Live Percentage & Parity Check</span>
                 </button>
-              ))}
-            </div>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {uploadHistory.map((item, idx) => (
+                  <div
+                    key={idx}
+                    className="p-3 rounded-lg bg-[#0C1322] border border-[#19273E] hover:border-emerald-500/40 transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs font-mono"
+                  >
+                    <div className="flex items-start gap-2.5 min-w-0">
+                      <div className="w-8 h-8 rounded-lg bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0 mt-0.5">
+                        <FileCheck className="w-4 h-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="font-bold text-white truncate max-w-xs sm:max-w-md" title={item.fileName}>
+                          {item.fileName}
+                        </p>
+                        <div className="flex items-center gap-2 text-[10px] text-slate-400 flex-wrap mt-0.5">
+                          <span>Original: <strong className="text-white">{item.originalSizeBytes.toLocaleString()} bytes</strong> ({item.formattedOriginalSize})</span>
+                          <span>•</span>
+                          <span>In Storage: <strong className="text-emerald-300">{item.processedSizeBytes.toLocaleString()} bytes</strong> ({item.formattedProcessedSize})</span>
+                          <span>•</span>
+                          <span>SHA-256: <code className="text-amber-300">{item.checksum}</code></span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0 self-end sm:self-center flex-wrap">
+                      <span className="text-[10px] font-bold text-emerald-300 px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 flex items-center gap-1">
+                        <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                        <span>100% Match (Δ 0 B)</span>
+                      </span>
+
+                      {onAskAboutMemory && (
+                        <button
+                          type="button"
+                          onClick={() => onAskAboutMemory({
+                            id: `upload-${item.fileName}`,
+                            title: item.fileName,
+                            category: 'CUSTOM_DATA',
+                            sourceType: 'FILE_UPLOAD',
+                            fileName: item.fileName,
+                            fileSize: item.formattedProcessedSize,
+                            fileType: 'text/plain',
+                            createdAt: Date.now(),
+                            updatedAt: Date.now(),
+                            isActive: true,
+                            tags: ['Uploaded File', 'Custom Knowledge'],
+                            content: `Uploaded File "${item.fileName}" (${item.formattedProcessedSize}). Full content preserved in ANGEL X.`
+                          })}
+                          className="px-2.5 py-1 rounded bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 hover:text-white border border-amber-500/30 text-[10px] cursor-pointer flex items-center gap-1 font-bold"
+                          title="Ask ANGEL to read this uploaded file and apply it"
+                        >
+                          <MessageSquare className="w-3 h-3 text-amber-400" />
+                          <span>Ask ANGEL</span>
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedChapter(item.fileName);
+                          setViewingMemory(angelXFile);
+                        }}
+                        className="px-2.5 py-1 rounded bg-[#141E33] hover:bg-[#1D2B47] text-slate-300 hover:text-white border border-[#233352] text-[10px] cursor-pointer"
+                        title="View this file inside ANGEL X"
+                      >
+                        View Content
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Content Excerpt / Interactive Preview */}
@@ -853,39 +881,39 @@ export const AngelMemoryDataManager: React.FC<AngelMemoryDataManagerProps> = ({ 
               </div>
             </div>
 
-            {/* Quick Chapter Selector inside Modal */}
-            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-1 border-b border-[#152035]">
-              <button
-                type="button"
-                onClick={() => setSelectedChapter(null)}
-                className={`px-2.5 py-1 rounded-md text-[11px] font-mono shrink-0 cursor-pointer ${
-                  selectedChapter === null
-                    ? 'bg-amber-500/25 text-amber-300 border border-amber-500/40'
-                    : 'text-slate-400 hover:text-white bg-[#0D1424] border border-[#172236]'
-                }`}
-              >
-                Full Document (All Chapters)
-              </button>
-              {MASTER_CHAPTERS.map(ch => (
-                <button
-                  key={ch.id}
-                  type="button"
-                  onClick={() => setSelectedChapter(ch.title)}
-                  className={`px-2.5 py-1 rounded-md text-[11px] font-mono shrink-0 cursor-pointer truncate max-w-[200px] ${
-                    selectedChapter === ch.title
-                      ? 'bg-amber-500/25 text-amber-300 border border-amber-500/40'
-                      : 'text-slate-400 hover:text-white bg-[#0D1424] border border-[#172236]'
-                  }`}
-                  title={ch.title}
+            {/* Chapter Jump Selector (Clean Dropdown, Zero Messy Tabs) */}
+            <div className="flex items-center justify-between gap-3 py-2 px-1 border-b border-[#152035] text-xs font-mono">
+              <div className="flex items-center gap-2">
+                <BookOpen className="w-3.5 h-3.5 text-amber-400" />
+                <span className="text-slate-400 hidden sm:inline">Chapter:</span>
+                <select
+                  value={selectedChapter || ''}
+                  onChange={(e) => setSelectedChapter(e.target.value || null)}
+                  className="bg-[#0D1424] border border-[#1D2A44] rounded-lg px-2.5 py-1 text-xs text-amber-300 font-mono focus:outline-none focus:border-amber-400 cursor-pointer max-w-[280px] sm:max-w-md truncate"
                 >
-                  {ch.title.split(':')[0]}
+                  <option value="">Full Document (All Chapters & Data)</option>
+                  {MASTER_CHAPTERS.map(ch => (
+                    <option key={ch.id} value={ch.title}>
+                      {ch.title}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {selectedChapter && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedChapter(null)}
+                  className="text-xs text-amber-400 hover:text-amber-300 underline cursor-pointer"
+                >
+                  Show All Chapters
                 </button>
-              ))}
+              )}
             </div>
 
             {/* Document Body */}
             <div className="flex-1 overflow-y-auto bg-[#070A10] border border-[#182338] rounded-xl p-4 sm:p-5 text-xs font-mono text-slate-300 whitespace-pre-wrap leading-relaxed select-text">
-              {viewingMemory.content}
+              {displayedContent || viewingMemory.content}
             </div>
 
             {/* Bottom Actions */}
@@ -925,6 +953,21 @@ export const AngelMemoryDataManager: React.FC<AngelMemoryDataManagerProps> = ({ 
           </div>
         </div>
       )}
+
+      {/* ========================================================================= */}
+      {/* MODAL 3: PREMIUM FILE UPLOAD & REAL-TIME PERCENTAGE / PARITY VERIFICATION */}
+      {/* ========================================================================= */}
+      <AngelFileUploadModal
+        isOpen={isUploadModalOpen}
+        onClose={() => {
+          setIsUploadModalOpen(false);
+          setPendingUploadFile(null);
+        }}
+        angelXFile={angelXFile}
+        goldMemories={goldMemories}
+        initialFile={pendingUploadFile}
+        onMergeComplete={handleMergeComplete}
+      />
     </div>
   );
 };

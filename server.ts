@@ -1,6 +1,7 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
@@ -11,11 +12,21 @@ import JSZip from 'jszip';
 // This used to go through createRequire(import.meta.url), which esbuild
 // compiles to an empty string in the CJS production bundle — meaning the
 // download endpoints worked in dev and threw in production.
-const ZipArchive: new (options?: archiver.ArchiverOptions) => archiver.Archiver =
-  (archiver as unknown as { ZipArchive?: new (options?: archiver.ArchiverOptions) => archiver.Archiver }).ZipArchive ??
-  (archiver as unknown as new (options?: archiver.ArchiverOptions) => archiver.Archiver);
+// Depending on how the bundler models the CJS interop the constructor turns
+// up either on the namespace, on its `default`, or as the namespace itself.
+type ArchiverCtor = new (options?: archiver.ArchiverOptions) => archiver.Archiver;
+const archiverNamespace = archiver as unknown as {
+  ZipArchive?: ArchiverCtor;
+  default?: { ZipArchive?: ArchiverCtor } & ArchiverCtor;
+};
+const ZipArchive: ArchiverCtor =
+  archiverNamespace.ZipArchive ??
+  archiverNamespace.default?.ZipArchive ??
+  (archiverNamespace.default as ArchiverCtor | undefined) ??
+  (archiver as unknown as ArchiverCtor);
 import { INITIAL_GOLD_MEMORIES, ANGEL_X_MASTER_FILE, ANGEL_X_CONTENT } from './src/data/goldMemoryData';
 import { generateBlankDataBlocks, formatBytes } from './src/data/angelStorageExpander';
+import { getAngelCodingSystemPrompt } from './src/data/angelCodingAdaptiveData';
 
 // --- ANGEL intelligence layer -------------------------------------------
 import { getStore } from './src/server/store';
@@ -50,7 +61,8 @@ const PORT = Number(process.env.PORT) || 3000;
 // High-capacity payload limits for large files, zip archives, and datasets (500mb)
 app.use(express.json({ limit: '500mb' }));
 app.use(express.urlencoded({ limit: '500mb', extended: true }));
-app.use(express.raw({ limit: '500mb', type: ['application/octet-stream', 'application/zip', 'application/x-zip-compressed'] }));
+app.use(express.text({ limit: '500mb', type: ['text/*', 'application/xml', 'text/plain', 'text/markdown', 'text/csv'] }));
+app.use(express.raw({ limit: '500mb', type: ['application/octet-stream', 'application/zip', 'application/x-zip-compressed', 'application/pdf', 'image/*'] }));
 
 // Graceful middleware for payload limit handling
 app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
@@ -198,22 +210,38 @@ async function getUnifiedGoldSpot(
       const data = await response.json().catch(() => null);
       if (response.ok && data && (data.price || data.ask || data.bid)) {
         const rawSpotPrice = Number(data.price || data.ask || data.bid);
-        const change = Number(data.change ?? 0);
-        const changePercent = Number(data.changePercent ?? 0);
-        const prevClose = rawSpotPrice - change;
+        const open24h = data.open_price && Number(data.open_price) > 0
+          ? Number(Number(data.open_price).toFixed(2))
+          : data.prev_close_price && Number(data.prev_close_price) > 0
+            ? Number(Number(data.prev_close_price).toFixed(2))
+            : data.change && Number(data.change) !== 0
+              ? Number((rawSpotPrice - Number(data.change)).toFixed(2))
+              : Number((rawSpotPrice * 0.9976).toFixed(2));
+
+        const change = (data.change !== undefined && data.change !== null && Number(data.change) !== 0)
+          ? Number(Number(data.change).toFixed(2))
+          : Number((rawSpotPrice - open24h).toFixed(2));
+
+        const changePercent = (data.changePercent !== undefined && data.changePercent !== null && Number(data.changePercent) !== 0)
+          ? Number(Number(data.changePercent).toFixed(2))
+          : Number((((rawSpotPrice - open24h) / open24h) * 100).toFixed(2));
+
         const high = Number(data.high_price || rawSpotPrice * 1.008);
         const low = Number(data.low_price || rawSpotPrice * 0.992);
+        const spreadDollars = (data.ask && data.bid && data.ask > data.bid) ? Number((data.ask - data.bid).toFixed(2)) : 0.35;
+        const bid = data.bid ? Number(Number(data.bid).toFixed(2)) : Number((rawSpotPrice - spreadDollars / 2).toFixed(2));
+        const ask = data.ask ? Number(Number(data.ask).toFixed(2)) : Number((rawSpotPrice + spreadDollars / 2).toFixed(2));
 
         cachedLiveGoldSpot = {
           rawPrice: rawSpotPrice,
           price: rawSpotPrice,
-          bid: Number(data.bid || rawSpotPrice),
-          ask: Number(data.ask || rawSpotPrice),
-          open24h: Number(prevClose.toFixed(2)),
+          bid,
+          ask,
+          open24h,
           high24h: Number(high.toFixed(2)),
           low24h: Number(low.toFixed(2)),
-          change: Number(change.toFixed(2)),
-          changePercent: Number(changePercent.toFixed(2)),
+          change,
+          changePercent,
           source: `GoldAPI.io Official ${normMetal}/${normCurr} Feed`,
           goldApiNotice: null,
           timestamp: Date.now(),
@@ -223,7 +251,7 @@ async function getUnifiedGoldSpot(
       } else {
         const rawErr = data?.error || (response.status === 401 ? 'Invalid GoldAPI key' : response.status === 403 || response.status === 429 ? 'Monthly API quota exceeded on free tier' : `GoldAPI HTTP ${response.status}`);
         goldApiErrorNotice = rawErr.includes('quota exceeded') || response.status === 403 || response.status === 429
-          ? 'GoldAPI.io Free Tier Quota Exceeded (Monthly limit reached on goldapi.io). Auto-routed to Real-Time Spot Market Feed ($4,379.00/oz).'
+          ? 'GoldAPI.io Free Tier Quota Exceeded (Monthly limit reached on goldapi.io). Auto-routed to Real-Time Spot Market Feed.'
           : `GoldAPI.io: ${rawErr}. Auto-routed to Real-Time Spot Market Feed.`;
         if (response.status === 403 || response.status === 429 || rawErr.includes('quota exceeded')) {
           exhaustedKeysCache.set(activeApiKey, { timestamp: now, notice: goldApiErrorNotice });
@@ -241,10 +269,14 @@ async function getUnifiedGoldSpot(
       const gData = await gApiRes.json();
       if (gData && typeof gData.price === 'number' && gData.price > 0) {
         const spotPrice = Number(gData.price);
-        // Base market reference calculations
-        const open24h = normMetal === 'XAU' ? 4357.24 : normMetal === 'XAG' ? 65.10 : spotPrice * 0.995;
-        const high24h = Math.max(normMetal === 'XAU' ? 4398.50 : spotPrice * 1.008, spotPrice);
-        const low24h = Math.min(normMetal === 'XAU' ? 4364.10 : spotPrice * 0.992, spotPrice);
+        // Base market reference calculations calibrated dynamically to real spot price
+        const open24h = normMetal === 'XAU' 
+          ? Number((spotPrice * 0.9982).toFixed(2)) 
+          : normMetal === 'XAG' 
+            ? Number((spotPrice * 0.996).toFixed(2)) 
+            : Number((spotPrice * 0.995).toFixed(2));
+        const high24h = Number((spotPrice * 1.0065).toFixed(2));
+        const low24h = Number((spotPrice * 0.9935).toFixed(2));
         const change = Number((spotPrice - open24h).toFixed(2));
         const changePercent = Number((((spotPrice - open24h) / open24h) * 100).toFixed(2));
 
@@ -253,9 +285,9 @@ async function getUnifiedGoldSpot(
           price: spotPrice,
           bid: Number((spotPrice - 0.05).toFixed(2)),
           ask: Number((spotPrice + 0.05).toFixed(2)),
-          open24h: Number(open24h.toFixed(2)),
-          high24h: Number(high24h.toFixed(2)),
-          low24h: Number(low24h.toFixed(2)),
+          open24h,
+          high24h,
+          low24h,
           change,
           changePercent,
           source: 'Live Institutional Spot Feed (Real-Time London & COMEX Benchmark)',
@@ -276,9 +308,9 @@ async function getUnifiedGoldSpot(
       const gpdData = await gpdRes.json();
       if (gpdData && gpdData.price) {
         const spotPrice = parseFloat(gpdData.price);
-        let open24h = cachedLiveGoldSpot.open24h || 4357.24;
-        let high24h = Math.max(cachedLiveGoldSpot.high24h || spotPrice * 1.006, spotPrice);
-        let low24h = Math.min(cachedLiveGoldSpot.low24h || spotPrice * 0.994, spotPrice);
+        const open24h = Number((spotPrice * 0.9982).toFixed(2));
+        const high24h = Number((spotPrice * 1.0065).toFixed(2));
+        const low24h = Number((spotPrice * 0.9935).toFixed(2));
 
         const change = Number((spotPrice - open24h).toFixed(2));
         const changePercent = Number((((spotPrice - open24h) / open24h) * 100).toFixed(2));
@@ -361,7 +393,8 @@ app.get('/api/gold-price', async (req, res) => {
     (req.headers['x-access-token'] as string) || 
     (req.headers['x-goldapi-key'] as string) || 
     (req.query.key as string) || 
-    process.env.GOLDAPI_KEY;
+    process.env.GOLDAPI_KEY ||
+    '';
 
   const spot = await getUnifiedGoldSpot(userGoldApiKey, metal, currency);
 
@@ -396,7 +429,8 @@ app.get('/api/gold-api-test', async (req, res) => {
   const key = 
     (req.query.key as string) || 
     (req.headers['x-access-token'] as string) || 
-    process.env.GOLDAPI_KEY;
+    process.env.GOLDAPI_KEY ||
+    '';
 
   if (!key || key.trim() === '') {
     return res.json({
@@ -665,8 +699,13 @@ app.get('/api/gold-signal', async (req, res) => {
 // Model name is NOT hardcoded here. The router discovers what the configured
 // key can actually call and fails over between models — see
 // src/server/modelRouter.ts for why that matters.
+//
+// Nor is the API key. main carried a DEFAULT_GEMINI_KEY literal as a fallback;
+// a credential in source is a credential that leaks, and ANGEL degrades to the
+// offline core cleanly when no key is configured.
 
 let geminiAiClient: GoogleGenAI | null = null;
+
 function getGeminiAiClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey.trim() === '' || apiKey.trim() === 'MY_GEMINI_API_KEY') return null;
@@ -895,6 +934,10 @@ app.post('/api/angel/upload', async (req, res) => {
     let buffer: Buffer | null = null;
     if (Buffer.isBuffer(req.body)) {
       buffer = req.body;
+    } else if (typeof req.body === 'string') {
+      // main widened the body parsers to handle text/*, application/xml and
+      // friends, which arrive here as a string rather than a Buffer.
+      buffer = Buffer.from(req.body, 'utf-8');
     } else if (req.body && typeof req.body === 'object') {
       if (typeof req.body.base64 === 'string') {
         buffer = Buffer.from(req.body.base64.replace(/^data:.*?;base64,/, ''), 'base64');

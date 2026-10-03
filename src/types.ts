@@ -582,6 +582,8 @@ export type GoldMemoryCategory =
   | 'TRADE_JOURNAL' 
   | 'UPLOADED_DOC' 
   | 'CONVERSATION_MEMORY' 
+  | 'CODING_ARCHITECTURE'
+  | 'SELF_ADAPTIVE_AI'
   | 'CUSTOM_DATA';
 
 export interface GoldMemoryItem {
@@ -592,12 +594,37 @@ export interface GoldMemoryItem {
   sourceType: 'TEXT_NOTE' | 'FILE_UPLOAD';
   fileName?: string;
   fileSize?: string;
+  fileSizeBytes?: number;
+  originalSizeBytes?: number;
+  processedSizeBytes?: number;
+  parityPercent?: number;
+  checksum?: string;
+  isUploadVerified?: boolean;
   fileType?: string;
   createdAt: number;
   updatedAt: number;
   isActive: boolean;
   tags?: string[];
 }
+
+export interface UploadVerificationReport {
+  fileName: string;
+  fileType: string;
+  originalSizeBytes: number;
+  processedSizeBytes: number;
+  formattedOriginalSize: string;
+  formattedProcessedSize: string;
+  parityPercent: number;
+  deltaBytes: number;
+  checksum: string;
+  timestamp: number;
+  status: 'VERIFIED_EXACT_MATCH' | 'INTEGRATED' | 'PROCESSING' | 'ERROR';
+  extractedItemsCount: number;
+  angelXPreviousSizeBytes: number;
+  angelXNewSizeBytes: number;
+  message?: string;
+}
+
 
 export type AngelCommunicationStyle = 
   | 'GEMINI_COMPANION'
