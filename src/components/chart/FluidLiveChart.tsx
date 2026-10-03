@@ -19,7 +19,12 @@ import {
   Layers,
   Activity,
   ArrowUpDown,
-  Move
+  Move,
+  Ruler,
+  Table2,
+  Keyboard,
+  Lock,
+  Unlock
 } from 'lucide-react';
 import { useTrading } from '../../context/TradingContext';
 import { Candle, TimeframeId } from '../../types';
@@ -38,7 +43,13 @@ import {
   panVertical, 
   atLiveEdge, 
   followLatest, 
-  calculateVisiblePriceRange 
+  calculateVisiblePriceRange,
+  buildPriceTicks,
+  buildTimeTicks,
+  zoomStep,
+  measureBetween,
+  formatDuration,
+  MeasureResult
 } from '../../chart/fluidChartCore';
 import { 
   calculateSMA, 
@@ -47,6 +58,35 @@ import {
   calculateDailyPivots,
   detectSwingHighsAndLows
 } from '../../utils/technicalAnalysis';
+
+/** One aligned label/value line in the data window. */
+const DataRow: React.FC<{
+  label: string;
+  value: string;
+  tone?: 'up' | 'down';
+  color?: string;
+}> = ({ label, value, tone, color }) => {
+  const valueClass = color
+    ? color
+    : tone === 'up'
+      ? 'text-emerald-400'
+      : tone === 'down'
+        ? 'text-rose-400'
+        : 'text-slate-200';
+  return (
+    <div className="flex items-baseline justify-between gap-2">
+      <span className="text-slate-500">{label}</span>
+      <span className={`${valueClass} tabular-nums`}>{value}</span>
+    </div>
+  );
+};
+
+const Shortcut: React.FC<{ keys: string; action: string }> = ({ keys, action }) => (
+  <div className="flex items-baseline justify-between gap-2">
+    <span className="text-slate-200">{keys}</span>
+    <span className="text-slate-500 text-right">{action}</span>
+  </div>
+);
 
 export const FluidLiveChart: React.FC = () => {
   const { 
@@ -70,13 +110,30 @@ export const FluidLiveChart: React.FC = () => {
   const [showZones, setShowZones] = useState<boolean>(true);
   const [showVolume, setShowVolume] = useState<boolean>(true);
   const [crosshairEnabled, setCrosshairEnabled] = useState<boolean>(true);
+  const [showDataWindow, setShowDataWindow] = useState<boolean>(true);
+  const [showShortcuts, setShowShortcuts] = useState<boolean>(false);
+  const [measureMode, setMeasureMode] = useState<boolean>(false);
+
+  // MT5 quotes every instrument at its own precision. Reading "1.17" off a
+  // EUR/USD chart is useless, so every number on this surface is formatted
+  // from the instrument's own decimals rather than a hardcoded 2.
+  const digits = Number.isFinite(activeInstrument.decimals) ? activeInstrument.decimals : 2;
+  const pipMultiplier = activeInstrument.pipMultiplier || 1;
+
+  const formatPrice = useCallback(
+    (value: number | null | undefined): string =>
+      value === null || value === undefined || !Number.isFinite(value) ? '—' : value.toFixed(digits),
+    [digits],
+  );
 
   // Viewport State Machine (Data-space representation)
   const viewportRef = useRef<ViewportState>({
     firstLogical: 0,
     barSpacing: 9.5,
-    minBarSpacing: 2.5,
-    maxBarSpacing: 45,
+    // Matches the ends of ZOOM_LADDER so the +/- buttons can actually reach
+    // the widest and narrowest bars instead of stalling against a clamp.
+    minBarSpacing: 1.5,
+    maxBarSpacing: 50,
     priceMin: activeInstrument.currentPrice * 0.995,
     priceMax: activeInstrument.currentPrice * 1.005,
     autoScale: true,
@@ -94,6 +151,22 @@ export const FluidLiveChart: React.FC = () => {
   const [barCountdown, setBarCountdown] = useState<string>('');
   const lastHudTimeRef = useRef<number | null>(null);
   const renderRequestedRef = useRef<boolean>(false);
+
+  // Index of the bar under the cursor, so the data window can report the
+  // indicator values at that bar instead of only the newest ones.
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const [cursorPrice, setCursorPrice] = useState<number | null>(null);
+
+  // Measure ruler (MT5: hold the crosshair and drag)
+  const measureAnchorRef = useRef<{ price: number; logicalIndex: number; time: number } | null>(null);
+  const measureCursorRef = useRef<{ price: number; logicalIndex: number; time: number } | null>(null);
+  const [measure, setMeasure] = useState<MeasureResult | null>(null);
+
+  // Mirrors the viewport into React purely so the status bar can show it.
+  const [zoomInfo, setZoomInfo] = useState<{ spacing: number; visibleBars: number }>({
+    spacing: 9.5,
+    visibleBars: 0,
+  });
 
   // Live countdown to current bar completion across all 16 timeframes
   useEffect(() => {
@@ -122,7 +195,7 @@ export const FluidLiveChart: React.FC = () => {
   // Drag interaction tracking
   const dragRef = useRef<{
     isDragging: boolean;
-    dragType: 'PAN' | 'PRICE_SCALE';
+    dragType: 'PAN' | 'PRICE_SCALE' | 'TIME_SCALE' | 'MEASURE';
     startX: number;
     startY: number;
     lastX: number;
@@ -192,17 +265,36 @@ export const FluidLiveChart: React.FC = () => {
   const ema200 = useMemo(() => (showEma200 ? calculateEMA(closes, 200) : []), [closes, showEma200]);
   const vwapData = useMemo(() => (showVwap ? calculateVWAP(candles) : null), [candles.length, lastBarTime, priceBracket, showVwap]);
 
-  // Initialize or snap viewport on candle array change or timeframe switch
+  // Switching timeframe or symbol is a fresh chart: reset scale and go live.
   useEffect(() => {
     const box = getPlotBox();
     const vp = viewportRef.current;
     vp.autoScale = true;
+    vp.followLive = true;
     setIsAutoscale(true);
+    measureAnchorRef.current = null;
+    measureCursorRef.current = null;
+    setMeasure(null);
     if (candles.length > 0) {
       followLatest(candles.length, box, vp);
       setIsFollowingLive(true);
     }
-  }, [candles.length, timeframe, activeInstrument.symbol, getPlotBox]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timeframe, activeInstrument.symbol]);
+
+  // New bars arriving must NOT yank the view back. MT5 keeps you where you
+  // are when you have scrolled into history; only a chart that is already at
+  // the live edge slides forward. The previous version reset autoscale and
+  // jumped to the latest bar on every single tick, which made it impossible
+  // to study an older candle.
+  useEffect(() => {
+    const box = getPlotBox();
+    const vp = viewportRef.current;
+    if (candles.length > 0 && vp.followLive) {
+      followLatest(candles.length, box, vp);
+      setIsFollowingLive(true);
+    }
+  }, [candles.length, getPlotBox]);
 
   // Main Canvas Render Pass with requestAnimationFrame
   const renderFrame = useCallback(() => {
@@ -228,7 +320,7 @@ export const FluidLiveChart: React.FC = () => {
 
     // 1. If autoscale is enabled, recompute price boundaries from visible bars
     if (vp.autoScale && candles.length > 0) {
-      const range = calculateVisiblePriceRange(candles, box, vp, { r2: pivots.r2, s2: pivots.s2 });
+      const range = calculateVisiblePriceRange(candles, box, vp, { r2: pivots.r2, s2: pivots.s2 }, digits);
       vp.priceMin = range.priceMin;
       vp.priceMax = range.priceMax;
     }
@@ -238,61 +330,48 @@ export const FluidLiveChart: React.FC = () => {
     ctx.fillRect(0, 0, totalWidth, totalHeight);
 
     // 3. Grid Lines (Horizontal Price Grid)
-    const priceRange = Math.max(vp.priceMax - vp.priceMin, 0.001);
-    const targetSteps = Math.max(4, Math.floor(box.height / 55));
-    const roughStep = priceRange / targetSteps;
-    const magnitude = Math.pow(10, Math.floor(Math.log10(roughStep)));
-    const normalized = roughStep / magnitude;
-    let step = magnitude;
-    if (normalized > 5) step = 5 * magnitude;
-    else if (normalized > 2) step = 2 * magnitude;
-    else step = magnitude;
+    // Steps land on round numbers (1/2/2.5/5 x 10^n) and labels carry exactly
+    // as many digits as the step needs, so no two rows ever read the same.
+    const { ticks: priceTicks } = buildPriceTicks(box, vp, {
+      decimals: digits,
+      targetSpacingPx: 52,
+    });
 
     ctx.lineWidth = 1;
-    ctx.strokeStyle = '#121A2A';
-    ctx.fillStyle = '#64748B';
     ctx.font = '10px JetBrains Mono, monospace';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
 
-    const firstGridPrice = Math.ceil(vp.priceMin / step) * step;
-    for (let p = firstGridPrice; p <= vp.priceMax; p += step) {
-      const y = priceToY(p, box, vp);
-      if (y >= box.top && y <= box.top + box.height) {
-        ctx.beginPath();
-        ctx.moveTo(box.left, y);
-        ctx.lineTo(box.left + box.width, y);
-        ctx.stroke();
+    for (const tick of priceTicks) {
+      ctx.strokeStyle = tick.major ? '#1B2538' : '#121A2A';
+      ctx.beginPath();
+      ctx.moveTo(box.left, tick.y);
+      ctx.lineTo(box.left + box.width, tick.y);
+      ctx.stroke();
 
-        // Right axis price tick label
-        ctx.fillText(p.toFixed(2), box.left + box.width + 8, y);
-      }
+      // Right axis price tick label
+      ctx.fillStyle = tick.major ? '#94A3B8' : '#64748B';
+      ctx.fillText(tick.label, box.left + box.width + 8, tick.y);
     }
 
-    // 4. Time Grid Lines (Vertical)
+    // 4. Time Grid Lines (Vertical) — calendar aware, like the MT5 time axis
     const visibleBars = box.width / vp.barSpacing;
-    const barInterval = Math.max(5, Math.pow(2, Math.floor(Math.log2(visibleBars / 6))) * 5);
     const firstBar = Math.floor(vp.firstLogical);
     const lastBar = Math.ceil(vp.firstLogical + visibleBars);
+    const timeTicks = buildTimeTicks(candles, box, vp, { minLabelSpacingPx: 74 });
 
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
 
-    for (let i = firstBar; i <= lastBar; i++) {
-      if (i >= 0 && i < candles.length && i % barInterval === 0) {
-        const x = logicalToX(i, box, vp);
-        if (x >= box.left && x <= box.left + box.width) {
-          ctx.beginPath();
-          ctx.moveTo(x, box.top);
-          ctx.lineTo(x, box.top + box.height);
-          ctx.stroke();
+    for (const tick of timeTicks) {
+      ctx.strokeStyle = tick.isDayBoundary ? '#243049' : '#121A2A';
+      ctx.beginPath();
+      ctx.moveTo(tick.x, box.top);
+      ctx.lineTo(tick.x, box.top + box.height);
+      ctx.stroke();
 
-          // Time label on bottom axis
-          const d = new Date(candles[i].time);
-          const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-          ctx.fillText(timeStr, x, box.top + box.height + 7);
-        }
-      }
+      ctx.fillStyle = tick.isDayBoundary ? '#CBD5E1' : '#64748B';
+      ctx.fillText(tick.label, tick.x, box.top + box.height + 7);
     }
 
     // 5. Volume Pane (Subwindow at bottom)
@@ -348,7 +427,7 @@ export const FluidLiveChart: React.FC = () => {
           ctx.font = '9px JetBrains Mono, monospace';
           ctx.textAlign = 'left';
           ctx.textBaseline = 'bottom';
-          ctx.fillText(`KEY ${label}: ${price.toFixed(2)}`, box.left + 8, y - 2);
+          ctx.fillText(`KEY ${label}: ${formatPrice(price)}`, box.left + 8, y - 2);
           ctx.restore();
         }
       };
@@ -506,13 +585,20 @@ export const FluidLiveChart: React.FC = () => {
       ctx.font = 'bold 10px JetBrains Mono, monospace';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(currentPrice.toFixed(2), box.left + box.width + 2 + badgeW / 2, curY);
+      ctx.fillText(formatPrice(currentPrice), box.left + box.width + 2 + badgeW / 2, curY);
       ctx.restore();
     }
 
     // 11. Crosshair & Dynamic Axes Badges
     if (crosshairEnabled && vp.crosshair) {
-      const { x, y, price, time } = vp.crosshair;
+      const { y, price, time, logicalIndex } = vp.crosshair;
+      // MT5 locks the vertical hair to the centre of the bar it is over, so
+      // the time badge and the OHLC readout always describe the same bar.
+      const snappedX =
+        logicalIndex >= 0 && logicalIndex < candles.length
+          ? logicalToX(logicalIndex, box, vp)
+          : vp.crosshair.x;
+      const x = snappedX;
 
       if (x >= box.left && x <= box.left + box.width && y >= box.top && y <= box.top + box.height) {
         ctx.save();
@@ -541,7 +627,7 @@ export const FluidLiveChart: React.FC = () => {
         ctx.font = 'bold 10px JetBrains Mono, monospace';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(price.toFixed(2), box.left + box.width + 2 + priceLabelW / 2, y);
+        ctx.fillText(formatPrice(price), box.left + box.width + 2 + priceLabelW / 2, y);
 
         // X-axis Time badge
         const d = new Date(time);
@@ -558,6 +644,79 @@ export const FluidLiveChart: React.FC = () => {
         ctx.restore();
       }
     }
+
+    // 11b. Measure ruler — the numbers MT5 shows while you drag the crosshair
+    const anchor = measureAnchorRef.current;
+    const tip = measureCursorRef.current;
+    if (anchor && tip) {
+      const ax = logicalToX(anchor.logicalIndex, box, vp);
+      const ay = priceToY(anchor.price, box, vp);
+      const bx = logicalToX(tip.logicalIndex, box, vp);
+      const by = priceToY(tip.price, box, vp);
+      const result = measureBetween(anchor, tip, pipMultiplier);
+      const rising = result.direction !== 'DOWN';
+      const accent = rising ? '#10B981' : '#EF4444';
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(box.left, box.top, box.width, box.height);
+      ctx.clip();
+
+      // Shaded span between the two anchors
+      ctx.fillStyle = rising ? 'rgba(16, 185, 129, 0.10)' : 'rgba(239, 68, 68, 0.10)';
+      ctx.fillRect(Math.min(ax, bx), Math.min(ay, by), Math.abs(bx - ax), Math.abs(by - ay));
+
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([5, 3]);
+      ctx.strokeRect(Math.min(ax, bx), Math.min(ay, by), Math.abs(bx - ax), Math.abs(by - ay));
+
+      // Direct line from start to end
+      ctx.setLineDash([]);
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(bx, by);
+      ctx.stroke();
+
+      // Readout card
+      const lines = [
+        `${result.priceDelta >= 0 ? '+' : ''}${result.priceDelta.toFixed(digits)}  (${result.percentDelta >= 0 ? '+' : ''}${result.percentDelta.toFixed(2)}%)`,
+        `${result.pips >= 0 ? '+' : ''}${result.pips.toFixed(1)} pips`,
+        `${Math.abs(result.bars)} bars  ${formatDuration(result.milliseconds)}`,
+      ];
+      ctx.font = 'bold 10px JetBrains Mono, monospace';
+      const cardW = Math.max(...lines.map((line) => ctx.measureText(line).width)) + 16;
+      const cardH = lines.length * 14 + 10;
+      let cardX = bx + 12;
+      let cardY = by - cardH / 2;
+      if (cardX + cardW > box.left + box.width) cardX = bx - cardW - 12;
+      cardY = Math.max(box.top + 2, Math.min(cardY, box.top + box.height - cardH - 2));
+
+      ctx.fillStyle = 'rgba(9, 14, 23, 0.95)';
+      ctx.fillRect(cardX, cardY, cardW, cardH);
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(cardX, cardY, cardW, cardH);
+
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      lines.forEach((line, index) => {
+        ctx.fillStyle = index === 0 ? accent : '#CBD5E1';
+        ctx.fillText(line, cardX + 8, cardY + 6 + index * 14);
+      });
+      ctx.restore();
+    }
+
+    // 11c. Publish the zoom level to the status bar. setState bails out when
+    // the values are unchanged, so this costs nothing on a redraw loop.
+    const barsOnScreen = Math.round(box.width / vp.barSpacing);
+    const spacingNow = Math.round(vp.barSpacing * 10) / 10;
+    setZoomInfo((previous) =>
+      previous.spacing === spacingNow && previous.visibleBars === barsOnScreen
+        ? previous
+        : { spacing: spacingNow, visibleBars: barsOnScreen },
+    );
 
     // 12. Gutter Dividers
     ctx.strokeStyle = '#1E2638';
@@ -591,7 +750,10 @@ export const FluidLiveChart: React.FC = () => {
     sma20,
     ema50,
     ema200,
-    vwapData
+    vwapData,
+    digits,
+    pipMultiplier,
+    formatPrice
   ]);
 
   // Request Animation Frame loop on state changes
@@ -604,48 +766,94 @@ export const FluidLiveChart: React.FC = () => {
     return () => cancelAnimationFrame(animId);
   }, [renderFrame]);
 
-  // Handle Wheel: Cursor-anchored horizontal zoom or independent price axis zoom
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    e.preventDefault();
+  // Handle Wheel: Cursor-anchored horizontal zoom or independent price axis zoom.
+  //
+  // This is registered natively with { passive: false } rather than through
+  // React's onWheel. React attaches wheel listeners passively at the root, so
+  // preventDefault() there is ignored by the browser: zooming the chart also
+  // scrolled the whole dashboard. A native listener is the only way to own
+  // the gesture.
+  const handleWheel = useCallback((e: WheelEvent) => {
     const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect) return;
+    e.preventDefault();
 
     const pointerX = e.clientX - rect.left;
     const pointerY = e.clientY - rect.top;
     const box = getPlotBox();
     const vp = viewportRef.current;
 
-    if (pointerX >= box.left + box.width) {
-      // Wheel on right price scale gutter -> zoom price scale vertically!
-      zoomVertical(pointerY, e.deltaY, box, vp);
+    // Trackpads report deltaMode 1 (lines) / 2 (pages); normalise to pixels
+    // or a single notch would jump the chart across the screen.
+    const delta = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * box.height : e.deltaY;
+
+    if (pointerX >= box.left + box.width || e.ctrlKey || e.metaKey) {
+      // Wheel on right price scale gutter (or Ctrl+wheel) -> zoom price scale
+      zoomVertical(pointerY, delta, box, vp);
       setIsAutoscale(false);
-    } else {
-      // Wheel on chart body -> cursor-anchored horizontal zoom!
-      zoomHorizontal(pointerX, e.deltaY, box, vp);
+    } else if (e.shiftKey) {
+      // Shift+wheel -> scroll through history without changing zoom
+      panHorizontal(-delta, box, vp);
       setIsFollowingLive(atLiveEdge(candles.length, box, vp));
+    } else {
+      // Wheel on chart body -> cursor-anchored horizontal zoom
+      zoomHorizontal(pointerX, delta, box, vp);
+      // Zooming away from the right edge means the user is studying history;
+      // stop auto-scrolling so the next tick does not drag them back.
+      vp.followLive = atLiveEdge(candles.length, box, vp);
+      setIsFollowingLive(vp.followLive);
     }
 
     renderFrame();
   }, [getPlotBox, candles.length, renderFrame]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.addEventListener('wheel', handleWheel, { passive: false });
+    return () => canvas.removeEventListener('wheel', handleWheel);
+  }, [handleWheel]);
 
   // Mouse Down: Start Pan or Price Drag
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect) return;
 
+    containerRef.current?.focus({ preventScroll: true });
+
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
     const box = getPlotBox();
+    const vp = viewportRef.current;
+
+    // Which gutter was grabbed decides the gesture, exactly as in MT5:
+    // right scale = stretch price, bottom scale = stretch time, body = pan.
+    let dragType: 'PAN' | 'PRICE_SCALE' | 'TIME_SCALE' | 'MEASURE' = 'PAN';
+    if (x >= box.left + box.width) dragType = 'PRICE_SCALE';
+    else if (y >= box.top + box.height) dragType = 'TIME_SCALE';
+    else if (measureMode || e.shiftKey) dragType = 'MEASURE';
+
+    if (dragType === 'MEASURE') {
+      const logicalIndex = Math.max(0, Math.min(candles.length - 1, Math.round(xToLogical(x, box, vp))));
+      const point = {
+        price: yToPrice(y, box, vp),
+        logicalIndex,
+        time: candles[logicalIndex]?.time ?? Date.now(),
+      };
+      measureAnchorRef.current = point;
+      measureCursorRef.current = point;
+      setMeasure(measureBetween(point, point, pipMultiplier));
+    }
 
     dragRef.current = {
       isDragging: true,
-      dragType: x >= box.left + box.width ? 'PRICE_SCALE' : 'PAN',
+      dragType,
       startX: x,
       startY: y,
       lastX: x,
       lastY: y,
     };
-  }, [getPlotBox]);
+  }, [getPlotBox, measureMode, candles, pipMultiplier]);
 
   // Mouse Move: Execute Pan / Price Drag & Update Crosshair
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
@@ -663,11 +871,29 @@ export const FluidLiveChart: React.FC = () => {
 
       if (dragRef.current.dragType === 'PAN') {
         panHorizontal(deltaX, box, vp);
+        // Dragging up/down inside the chart body nudges the price scale too,
+        // which is how MT5 behaves once autoscale is switched off.
+        if (!vp.autoScale && Math.abs(deltaY) > 0) {
+          panVertical(deltaY, box, vp);
+        }
         const live = atLiveEdge(candles.length, box, vp);
         setIsFollowingLive(live);
       } else if (dragRef.current.dragType === 'PRICE_SCALE') {
         panVertical(deltaY, box, vp);
         setIsAutoscale(false);
+      } else if (dragRef.current.dragType === 'TIME_SCALE') {
+        // Dragging the time axis compresses or expands the bars.
+        zoomHorizontal(box.left + box.width, -deltaX * 6, box, vp);
+        setIsFollowingLive(atLiveEdge(candles.length, box, vp));
+      } else if (dragRef.current.dragType === 'MEASURE' && measureAnchorRef.current) {
+        const logicalIndex = Math.max(0, Math.min(candles.length - 1, Math.round(xToLogical(x, box, vp))));
+        const point = {
+          price: yToPrice(y, box, vp),
+          logicalIndex,
+          time: candles[logicalIndex]?.time ?? Date.now(),
+        };
+        measureCursorRef.current = point;
+        setMeasure(measureBetween(measureAnchorRef.current, point, pipMultiplier));
       }
 
       dragRef.current.lastX = x;
@@ -677,7 +903,8 @@ export const FluidLiveChart: React.FC = () => {
     // Update crosshair data
     const logicalIdx = Math.round(xToLogical(x, box, vp));
     const priceAtCursor = yToPrice(y, box, vp);
-    const candleAtCursor = candles[logicalIdx] || (candles.length > 0 ? candles[candles.length - 1] : undefined);
+    const clampedIdx = Math.max(0, Math.min(candles.length - 1, logicalIdx));
+    const candleAtCursor = candles[logicalIdx] || (candles.length > 0 ? candles[clampedIdx] : undefined);
     const timeAtCursor = candleAtCursor?.time || (candles.length > 0 ? candles[candles.length - 1].time : Date.now());
 
     vp.crosshair = {
@@ -694,22 +921,48 @@ export const FluidLiveChart: React.FC = () => {
     if (cTime !== lastHudTimeRef.current) {
       lastHudTimeRef.current = cTime;
       setActiveHudCandle(candleAtCursor || null);
+      setHoverIndex(candles[logicalIdx] ? logicalIdx : null);
     }
 
-    // Schedule 60fps canvas draw without choking the JavaScript event loop
+    // Schedule 60fps canvas draw without choking the JavaScript event loop.
+    // The cursor price is pushed into React here, on the same throttle, so the
+    // data window updates with the pointer but never more than once a frame.
     if (!renderRequestedRef.current) {
       renderRequestedRef.current = true;
       requestAnimationFrame(() => {
+        // Only re-render React when the *displayed* cursor price changes,
+        // not on every sub-tick pixel of mouse movement.
+        const quantized = Number(priceAtCursor.toFixed(digits));
+        setCursorPrice((previous) => (previous === quantized ? previous : quantized));
         renderFrame();
         renderRequestedRef.current = false;
       });
     }
-  }, [getPlotBox, candles, renderFrame]);
+  }, [getPlotBox, candles, renderFrame, pipMultiplier, digits]);
 
-  // Mouse Up: Terminate Drag
+  // Mouse Up: Terminate Drag. A measurement taken with a real drag stays on
+  // screen so the numbers can be read; a stray click clears it.
   const handleMouseUp = useCallback(() => {
+    if (dragRef.current.dragType === 'MEASURE') {
+      const anchor = measureAnchorRef.current;
+      const tip = measureCursorRef.current;
+      const negligible = !anchor || !tip || (anchor.logicalIndex === tip.logicalIndex && anchor.price === tip.price);
+      if (negligible) {
+        measureAnchorRef.current = null;
+        measureCursorRef.current = null;
+        setMeasure(null);
+      }
+    }
     dragRef.current.isDragging = false;
-  }, []);
+    renderFrame();
+  }, [renderFrame]);
+
+  const clearMeasurement = useCallback(() => {
+    measureAnchorRef.current = null;
+    measureCursorRef.current = null;
+    setMeasure(null);
+    renderFrame();
+  }, [renderFrame]);
 
   // Mouse Leave: Clear Crosshair
   const handleMouseLeave = useCallback(() => {
@@ -717,6 +970,8 @@ export const FluidLiveChart: React.FC = () => {
     viewportRef.current.crosshair = null;
     lastHudTimeRef.current = null;
     setActiveHudCandle(null);
+    setHoverIndex(null);
+    setCursorPrice(null);
     renderFrame();
   }, [renderFrame]);
 
@@ -779,10 +1034,14 @@ export const FluidLiveChart: React.FC = () => {
 
     if (e.touches.length === 1 && dragRef.current.isDragging) {
       const x = e.touches[0].clientX - rect.left;
+      const y = e.touches[0].clientY - rect.top;
       const deltaX = x - dragRef.current.lastX;
+      const deltaY = y - dragRef.current.lastY;
       panHorizontal(deltaX, box, vp);
+      if (!vp.autoScale) panVertical(deltaY, box, vp);
       setIsFollowingLive(atLiveEdge(candles.length, box, vp));
       dragRef.current.lastX = x;
+      dragRef.current.lastY = y;
       renderFrame();
     } else if (e.touches.length === 2 && pinchRef.current.active) {
       const t1 = e.touches[0];
@@ -793,7 +1052,14 @@ export const FluidLiveChart: React.FC = () => {
         vp.minBarSpacing,
         Math.min(vp.maxBarSpacing, pinchRef.current.initialSpacing * ratio)
       );
+      // Keep the bar under the pinch midpoint pinned, otherwise the chart
+      // slides sideways while you are only trying to zoom.
+      const anchorX = pinchRef.current.midpointX;
+      const anchorLogical = xToLogical(anchorX, box, vp);
       vp.barSpacing = newSpacing;
+      vp.firstLogical = anchorLogical - (anchorX - box.left) / newSpacing;
+      vp.followLive = atLiveEdge(candles.length, box, vp);
+      setIsFollowingLive(vp.followLive);
       renderFrame();
     }
   }, [getPlotBox, candles.length, renderFrame]);
@@ -814,22 +1080,20 @@ export const FluidLiveChart: React.FC = () => {
     renderFrame();
   }, [getPlotBox, candles.length, renderFrame]);
 
-  // Zoom Buttons
-  const handleZoomIn = useCallback(() => {
+  // Zoom Buttons — discrete steps, so each press is a predictable amount
+  const applyZoomStep = useCallback((direction: 1 | -1) => {
     const box = getPlotBox();
     const vp = viewportRef.current;
-    zoomHorizontal(box.left + box.width / 2, -120, box, vp);
+    // Zoom around the live edge when following, otherwise around the centre.
+    const anchorX = vp.followLive ? box.left + box.width : box.left + box.width / 2;
+    zoomStep(direction, box, vp, anchorX);
+    if (vp.followLive) followLatest(candles.length, box, vp);
     setIsFollowingLive(atLiveEdge(candles.length, box, vp));
     renderFrame();
   }, [getPlotBox, candles.length, renderFrame]);
 
-  const handleZoomOut = useCallback(() => {
-    const box = getPlotBox();
-    const vp = viewportRef.current;
-    zoomHorizontal(box.left + box.width / 2, 120, box, vp);
-    setIsFollowingLive(atLiveEdge(candles.length, box, vp));
-    renderFrame();
-  }, [getPlotBox, candles.length, renderFrame]);
+  const handleZoomIn = useCallback(() => applyZoomStep(1), [applyZoomStep]);
+  const handleZoomOut = useCallback(() => applyZoomStep(-1), [applyZoomStep]);
 
   const handleResetScale = useCallback(() => {
     const box = getPlotBox();
@@ -842,8 +1106,118 @@ export const FluidLiveChart: React.FC = () => {
     renderFrame();
   }, [getPlotBox, candles.length, renderFrame]);
 
+  const toggleAutoscale = useCallback(() => {
+    const vp = viewportRef.current;
+    vp.autoScale = !vp.autoScale;
+    setIsAutoscale(vp.autoScale);
+    renderFrame();
+  }, [renderFrame]);
+
+  // MT5 keyboard map. The chart is focusable, so these only fire when it has
+  // focus — typing in the ANGEL chat box never moves the chart.
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    const box = getPlotBox();
+    const vp = viewportRef.current;
+    const fast = e.ctrlKey || e.metaKey;
+    const panBars = fast ? Math.max(1, Math.round(box.width / vp.barSpacing / 2)) : 1;
+    let handled = true;
+
+    switch (e.key) {
+      case '+':
+      case '=':
+        applyZoomStep(1);
+        break;
+      case '-':
+      case '_':
+        applyZoomStep(-1);
+        break;
+      case 'ArrowLeft':
+        panHorizontal(panBars * vp.barSpacing, box, vp);
+        setIsFollowingLive(atLiveEdge(candles.length, box, vp));
+        break;
+      case 'ArrowRight':
+        panHorizontal(-panBars * vp.barSpacing, box, vp);
+        setIsFollowingLive(atLiveEdge(candles.length, box, vp));
+        break;
+      case 'ArrowUp':
+        panVertical(-24, box, vp);
+        setIsAutoscale(false);
+        break;
+      case 'ArrowDown':
+        panVertical(24, box, vp);
+        setIsAutoscale(false);
+        break;
+      case 'PageUp':
+        panHorizontal(box.width * 0.9, box, vp);
+        setIsFollowingLive(atLiveEdge(candles.length, box, vp));
+        break;
+      case 'PageDown':
+        panHorizontal(-box.width * 0.9, box, vp);
+        setIsFollowingLive(atLiveEdge(candles.length, box, vp));
+        break;
+      case 'Home':
+        vp.firstLogical = 0;
+        setIsFollowingLive(false);
+        break;
+      case 'End':
+        followLatest(candles.length, box, vp);
+        setIsFollowingLive(true);
+        break;
+      case '5':
+        toggleAutoscale();
+        break;
+      case 'Escape':
+        clearMeasurement();
+        break;
+      default:
+        handled = false;
+    }
+
+    if (!handled) {
+      const key = e.key.toLowerCase();
+      if (key === 'c') { setCrosshairEnabled((value) => !value); handled = true; }
+      else if (key === 'm') { setMeasureMode((value) => !value); handled = true; }
+      else if (key === 'd') { setShowDataWindow((value) => !value); handled = true; }
+      else if (key === 'l') { setChartType((value) => (value === 'LINE' ? 'CANDLESTICK' : 'LINE')); handled = true; }
+      else if (key === 'v') { setShowVolume((value) => !value); handled = true; }
+    }
+
+    if (handled) {
+      e.preventDefault();
+      renderFrame();
+    }
+  }, [getPlotBox, candles.length, renderFrame, applyZoomStep, toggleAutoscale, clearMeasurement]);
+
   const activeDominionSpec = getDominionTimeframe(timeframe);
   const currentCandle = activeHudCandle || (candles.length > 0 ? candles[candles.length - 1] : null);
+  const readoutIndex = hoverIndex ?? (candles.length > 0 ? candles.length - 1 : null);
+  const isHovering = hoverIndex !== null;
+
+  // Every indicator value is read at the hovered bar, not at the live edge,
+  // so the data window answers "what was this at that moment".
+  const readout = useMemo(() => {
+    if (readoutIndex === null || !candles[readoutIndex]) return null;
+    const candle = candles[readoutIndex];
+    const previous = readoutIndex > 0 ? candles[readoutIndex - 1] : null;
+    const change = candle.close - candle.open;
+    const prevChange = previous ? candle.close - previous.close : null;
+    return {
+      candle,
+      index: readoutIndex,
+      change,
+      changePercent: candle.open !== 0 ? (change / candle.open) * 100 : 0,
+      changePips: change * pipMultiplier,
+      range: candle.high - candle.low,
+      rangePips: (candle.high - candle.low) * pipMultiplier,
+      body: Math.abs(candle.close - candle.open),
+      upperWick: candle.high - Math.max(candle.open, candle.close),
+      lowerWick: Math.min(candle.open, candle.close) - candle.low,
+      versusPrevious: prevChange,
+      sma20: sma20[readoutIndex] ?? null,
+      ema50: ema50[readoutIndex] ?? null,
+      ema200: ema200[readoutIndex] ?? null,
+    };
+  }, [readoutIndex, candles, sma20, ema50, ema200, pipMultiplier]);
 
   return (
     <div className="bg-[#0D121D] border border-[#1E2638] rounded-2xl shadow-2xl p-3 sm:p-4 flex flex-col font-sans select-none">
@@ -978,7 +1352,7 @@ export const FluidLiveChart: React.FC = () => {
           <button
             type="button"
             onClick={() => setCrosshairEnabled(!crosshairEnabled)}
-            title="Toggle Cursor Crosshair"
+            title="Crosshair (C)"
             className={`p-2 rounded-xl border transition-colors cursor-pointer ${
               crosshairEnabled
                 ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-400'
@@ -987,6 +1361,58 @@ export const FluidLiveChart: React.FC = () => {
           >
             <CrosshairIcon className="w-4 h-4" />
           </button>
+
+          <button
+            type="button"
+            onClick={() => setMeasureMode(!measureMode)}
+            title="Measure tool — drag between two points (M, or hold Shift and drag)"
+            className={`p-2 rounded-xl border transition-colors cursor-pointer ${
+              measureMode
+                ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-400'
+                : 'bg-[#080C14] border-[#1E2638] text-slate-500 hover:text-white'
+            }`}
+          >
+            <Ruler className="w-4 h-4" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowDataWindow(!showDataWindow)}
+            title="Data Window (D)"
+            className={`p-2 rounded-xl border transition-colors cursor-pointer ${
+              showDataWindow
+                ? 'bg-sky-500/20 border-sky-500/50 text-sky-400'
+                : 'bg-[#080C14] border-[#1E2638] text-slate-500 hover:text-white'
+            }`}
+          >
+            <Table2 className="w-4 h-4" />
+          </button>
+
+          <button
+            type="button"
+            onClick={toggleAutoscale}
+            title={isAutoscale ? 'Auto scale is on — click to fix the price scale (5)' : 'Price scale is fixed — click for auto scale (5)'}
+            className={`p-2 rounded-xl border transition-colors cursor-pointer ${
+              isAutoscale
+                ? 'bg-[#080C14] border-[#1E2638] text-slate-500 hover:text-white'
+                : 'bg-amber-500/20 border-amber-500/50 text-amber-400'
+            }`}
+          >
+            {isAutoscale ? <Unlock className="w-4 h-4" /> : <Lock className="w-4 h-4" />}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowShortcuts(!showShortcuts)}
+            title="Keyboard shortcuts"
+            className={`p-2 rounded-xl border transition-colors cursor-pointer ${
+              showShortcuts
+                ? 'bg-slate-500/20 border-slate-500/50 text-slate-200'
+                : 'bg-[#080C14] border-[#1E2638] text-slate-500 hover:text-white'
+            }`}
+          >
+            <Keyboard className="w-4 h-4" />
+          </button>
         </div>
 
       </div>
@@ -994,12 +1420,15 @@ export const FluidLiveChart: React.FC = () => {
       {/* Interactive Canvas Stage Container */}
       <div 
         ref={containerRef}
-        className="relative w-full h-[450px] sm:h-[500px] overflow-hidden rounded-xl bg-[#080C14] border border-[#1A2234] cursor-crosshair touch-none"
+        tabIndex={0}
+        onKeyDown={handleKeyDown}
+        className={`relative w-full h-[450px] sm:h-[500px] overflow-hidden rounded-xl bg-[#080C14] border border-[#1A2234] touch-none outline-none focus:border-cyan-600/60 ${
+          measureMode ? 'cursor-cell' : 'cursor-crosshair'
+        }`}
       >
         {/* Main Fluid Canvas */}
         <canvas
           ref={canvasRef}
-          onWheel={handleWheel}
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
@@ -1019,18 +1448,130 @@ export const FluidLiveChart: React.FC = () => {
               <span>{activeDominionSpec.mt5Code}</span>
               {barCountdown && <span className="text-cyan-400 font-normal font-mono opacity-90">[{barCountdown}]</span>}
             </span>
-            <span className="text-slate-400">O: <strong className="text-slate-200">{currentCandle.open.toFixed(2)}</strong></span>
-            <span className="text-slate-400">H: <strong className="text-emerald-400">{currentCandle.high.toFixed(2)}</strong></span>
-            <span className="text-slate-400">L: <strong className="text-rose-400">{currentCandle.low.toFixed(2)}</strong></span>
-            <span className="text-slate-400">C: <strong className={currentCandle.close >= currentCandle.open ? 'text-emerald-400' : 'text-rose-400'}>{currentCandle.close.toFixed(2)}</strong></span>
+            <span className="text-slate-400">O: <strong className="text-slate-200">{formatPrice(currentCandle.open)}</strong></span>
+            <span className="text-slate-400">H: <strong className="text-emerald-400">{formatPrice(currentCandle.high)}</strong></span>
+            <span className="text-slate-400">L: <strong className="text-rose-400">{formatPrice(currentCandle.low)}</strong></span>
+            <span className="text-slate-400">C: <strong className={currentCandle.close >= currentCandle.open ? 'text-emerald-400' : 'text-rose-400'}>{formatPrice(currentCandle.close)}</strong></span>
+            {readout && (
+              <span className={readout.change >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                {readout.change >= 0 ? '+' : ''}{formatPrice(readout.change)} ({readout.changePercent >= 0 ? '+' : ''}{readout.changePercent.toFixed(2)}%)
+              </span>
+            )}
             {showVolume && <span className="text-slate-400">V: <strong className="text-slate-300">{currentCandle.volume.toLocaleString()}</strong></span>}
-            
-            {showSma20 && sma20.length > 0 && (
-              <span className="text-amber-400 text-[10px]">SMA20: {(sma20[sma20.length - 1] || 0).toFixed(2)}</span>
+
+            {showSma20 && readout?.sma20 !== null && readout?.sma20 !== undefined && (
+              <span className="text-amber-400 text-[10px]">SMA20: {formatPrice(readout.sma20)}</span>
             )}
-            {showEma50 && ema50.length > 0 && (
-              <span className="text-cyan-400 text-[10px]">EMA50: {(ema50[ema50.length - 1] || 0).toFixed(2)}</span>
+            {showEma50 && readout?.ema50 !== null && readout?.ema50 !== undefined && (
+              <span className="text-cyan-400 text-[10px]">EMA50: {formatPrice(readout.ema50)}</span>
             )}
+            {isHovering && <span className="text-slate-500 text-[10px]">bar #{(readoutIndex ?? 0) + 1}</span>}
+          </div>
+        )}
+
+        {/* MT5 Data Window — every number for the bar under the cursor */}
+        {showDataWindow && readout && (
+          <div className="absolute top-2 right-[86px] z-10 w-[188px] hidden sm:block bg-[#090E17]/95 backdrop-blur-md rounded-lg border border-[#1E2638] shadow-xl text-[10px] font-mono overflow-hidden">
+            <div className="flex items-center justify-between px-2.5 py-1.5 bg-[#0E1626] border-b border-[#1E2638]">
+              <span className="text-slate-300 font-semibold tracking-wide">DATA WINDOW</span>
+              <button
+                type="button"
+                onClick={() => setShowDataWindow(false)}
+                className="text-slate-500 hover:text-white cursor-pointer leading-none"
+                title="Hide (D)"
+              >
+                ×
+              </button>
+            </div>
+            <div className="px-2.5 py-1.5 space-y-[3px]">
+              <DataRow label="Date" value={new Date(readout.candle.time).toLocaleDateString([], { day: '2-digit', month: 'short', year: '2-digit' })} />
+              <DataRow label="Time" value={new Date(readout.candle.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })} />
+              <div className="h-px bg-[#1A2234] my-1" />
+              <DataRow label="Open" value={formatPrice(readout.candle.open)} />
+              <DataRow label="High" value={formatPrice(readout.candle.high)} tone="up" />
+              <DataRow label="Low" value={formatPrice(readout.candle.low)} tone="down" />
+              <DataRow label="Close" value={formatPrice(readout.candle.close)} tone={readout.change >= 0 ? 'up' : 'down'} />
+              <DataRow label="Volume" value={readout.candle.volume.toLocaleString()} />
+              <div className="h-px bg-[#1A2234] my-1" />
+              <DataRow
+                label="Change"
+                value={`${readout.change >= 0 ? '+' : ''}${formatPrice(readout.change)}`}
+                tone={readout.change >= 0 ? 'up' : 'down'}
+              />
+              <DataRow
+                label="Change %"
+                value={`${readout.changePercent >= 0 ? '+' : ''}${readout.changePercent.toFixed(2)}%`}
+                tone={readout.change >= 0 ? 'up' : 'down'}
+              />
+              <DataRow
+                label="Change pips"
+                value={`${readout.changePips >= 0 ? '+' : ''}${readout.changePips.toFixed(1)}`}
+                tone={readout.change >= 0 ? 'up' : 'down'}
+              />
+              <DataRow label="Range" value={`${formatPrice(readout.range)} (${readout.rangePips.toFixed(1)}p)`} />
+              <DataRow label="Body" value={formatPrice(readout.body)} />
+              <DataRow label="Wick up" value={formatPrice(readout.upperWick)} />
+              <DataRow label="Wick dn" value={formatPrice(readout.lowerWick)} />
+              {(showSma20 || showEma50 || showEma200 || showVwap) && <div className="h-px bg-[#1A2234] my-1" />}
+              {showSma20 && <DataRow label="SMA 20" value={formatPrice(readout.sma20)} color="text-amber-300" />}
+              {showEma50 && <DataRow label="EMA 50" value={formatPrice(readout.ema50)} color="text-cyan-300" />}
+              {showEma200 && <DataRow label="EMA 200" value={formatPrice(readout.ema200)} color="text-purple-300" />}
+              {showVwap && vwapData && <DataRow label="VWAP" value={formatPrice(vwapData.vwap)} color="text-blue-300" />}
+              <div className="h-px bg-[#1A2234] my-1" />
+              <DataRow label="Cursor" value={formatPrice(cursorPrice)} color="text-slate-200" />
+              <DataRow label="Bid" value={formatPrice(activeInstrument.bid)} />
+              <DataRow label="Ask" value={formatPrice(activeInstrument.ask)} />
+              <DataRow label="Spread" value={Number.isFinite(activeInstrument.spreadPips) ? `${activeInstrument.spreadPips.toFixed(1)} pips` : '—'} />
+              <DataRow label="Bars" value={`${(readout.index + 1).toLocaleString()} / ${candles.length.toLocaleString()}`} />
+            </div>
+            {!isHovering && (
+              <div className="px-2.5 pb-1.5 text-[9px] text-slate-500">Showing latest bar — hover the chart</div>
+            )}
+          </div>
+        )}
+
+        {/* Measure ruler summary */}
+        {measure && (
+          <div className="absolute bottom-10 left-2 z-20 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#090E17]/95 border border-[#1E2638] text-[10px] font-mono shadow-lg">
+            <Ruler className="w-3.5 h-3.5 text-emerald-400" />
+            <span className={measure.priceDelta >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+              {measure.priceDelta >= 0 ? '+' : ''}{formatPrice(measure.priceDelta)}
+            </span>
+            <span className="text-slate-400">{measure.percentDelta >= 0 ? '+' : ''}{measure.percentDelta.toFixed(2)}%</span>
+            <span className="text-slate-400">{measure.pips >= 0 ? '+' : ''}{measure.pips.toFixed(1)} pips</span>
+            <span className="text-slate-500">{Math.abs(measure.bars)} bars · {formatDuration(measure.milliseconds)}</span>
+            <button type="button" onClick={clearMeasurement} className="text-slate-500 hover:text-white cursor-pointer">×</button>
+          </div>
+        )}
+
+        {/* Keyboard shortcut reference */}
+        {showShortcuts && (
+          <div className="absolute inset-x-2 bottom-2 sm:inset-x-auto sm:left-2 sm:w-[420px] z-30 bg-[#090E17]/97 backdrop-blur-md rounded-lg border border-[#1E2638] shadow-2xl p-3 text-[10px] font-mono">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-slate-200 font-semibold tracking-wide">CHART CONTROLS</span>
+              <button type="button" onClick={() => setShowShortcuts(false)} className="text-slate-500 hover:text-white cursor-pointer">×</button>
+            </div>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-slate-400">
+              <Shortcut keys="Scroll" action="Zoom at cursor" />
+              <Shortcut keys="+ / −" action="Zoom step in / out" />
+              <Shortcut keys="Shift + scroll" action="Scroll history" />
+              <Shortcut keys="← →" action="Pan one bar" />
+              <Shortcut keys="Ctrl + scroll" action="Zoom price scale" />
+              <Shortcut keys="Ctrl + ← →" action="Pan one screen" />
+              <Shortcut keys="Drag chart" action="Pan" />
+              <Shortcut keys="↑ ↓" action="Shift price scale" />
+              <Shortcut keys="Drag price axis" action="Stretch price" />
+              <Shortcut keys="Home / End" action="Oldest / latest bar" />
+              <Shortcut keys="Drag time axis" action="Stretch time" />
+              <Shortcut keys="5" action="Auto scale on / off" />
+              <Shortcut keys="Shift + drag" action="Measure" />
+              <Shortcut keys="M" action="Measure mode" />
+              <Shortcut keys="Double-click" action="Reset to live" />
+              <Shortcut keys="C / D / V / L" action="Crosshair / data / vol / line" />
+              <Shortcut keys="Pinch" action="Zoom (touch)" />
+              <Shortcut keys="Esc" action="Clear measurement" />
+            </div>
+            <p className="mt-2 text-[9px] text-slate-500">Click the chart first so it has keyboard focus.</p>
           </div>
         )}
 
@@ -1046,25 +1587,38 @@ export const FluidLiveChart: React.FC = () => {
           </button>
         )}
 
-        {/* Autoscale Toggle Affordance Badge */}
-        {!isAutoscale && (
-          <button
-            type="button"
-            onClick={() => {
-              viewportRef.current.autoScale = true;
-              setIsAutoscale(true);
-              renderFrame();
-            }}
-            className="absolute top-2 right-24 z-20 px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/40 text-amber-300 text-[10px] font-mono font-semibold cursor-pointer hover:bg-amber-500/25"
-          >
-            Manual Scale (Double-click to reset)
-          </button>
+        {/* Status strip — the MT5 chart status bar */}
+        {!showShortcuts && (
+          <div className="absolute bottom-2 left-2 flex items-center gap-2 text-[10px] font-mono">
+            <span className="text-slate-500 tabular-nums">
+              {zoomInfo.visibleBars} bars · {zoomInfo.spacing.toFixed(1)} px/bar
+            </span>
+            <button
+              type="button"
+              onClick={toggleAutoscale}
+              className={`px-1.5 py-0.5 rounded border cursor-pointer transition-colors ${
+                isAutoscale
+                  ? 'border-[#1E2638] text-slate-500 hover:text-slate-300'
+                  : 'border-amber-500/40 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25'
+              }`}
+              title="Toggle auto scale (5)"
+            >
+              {isAutoscale ? 'AUTO SCALE' : 'FIXED SCALE'}
+            </button>
+            {measureMode && (
+              <span className="px-1.5 py-0.5 rounded border border-emerald-500/40 bg-emerald-500/15 text-emerald-300">
+                MEASURE
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => setShowShortcuts(true)}
+              className="hidden sm:inline text-slate-600 hover:text-slate-300 cursor-pointer"
+            >
+              shortcuts
+            </button>
+          </div>
         )}
-
-        {/* Subtle MT5 Interaction Guide Tooltip on bottom-left */}
-        <div className="absolute bottom-2 left-2 pointer-events-none text-[10px] font-mono text-slate-500 hidden sm:block">
-          Scroll: Zoom • Drag Chart: Pan • Drag Price Scale: Vertical Scale
-        </div>
       </div>
 
     </div>

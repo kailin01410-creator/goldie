@@ -176,7 +176,8 @@ export function calculateVisiblePriceRange(
   bars: Candle[],
   box: PlotBox,
   viewport: ViewportState,
-  pivots?: { r2?: number; s2?: number }
+  pivots?: { r2?: number; s2?: number },
+  decimals: number = 3
 ): { priceMin: number; priceMax: number } {
   if (bars.length === 0) {
     return { priceMin: 0, priceMax: 100 };
@@ -208,11 +209,17 @@ export function calculateVisiblePriceRange(
   }
 
   const range = max - min;
-  const padding = range > 0 ? range * 0.09 : 1.0;
+  // Pad relative to the price when the window is flat, otherwise a single
+  // repeated close would collapse the scale to a zero-height band.
+  const padding = range > 0 ? range * 0.09 : Math.max(max * 0.0005, tickSizeForDecimals(decimals) * 10);
+
+  // Round at the instrument's own precision, never at a fixed 3 decimals —
+  // that used to flatten EUR/USD (5 digits) onto a 0.001 grid.
+  const rounding = Math.max(decimals + 1, 3);
 
   return {
-    priceMin: Number((min - padding).toFixed(3)),
-    priceMax: Number((max + padding).toFixed(3)),
+    priceMin: Number((min - padding).toFixed(rounding)),
+    priceMax: Number((max + padding).toFixed(rounding)),
   };
 }
 
@@ -256,4 +263,224 @@ export function aggregateTickIntoCandles(
   }
 
   return copy;
+}
+
+/* ------------------------------------------------------------------ */
+/* MT5-style scale construction                                        */
+/*                                                                     */
+/* MetaTrader draws grid lines on round numbers and labels them with   */
+/* exactly as many digits as the step requires. The previous code      */
+/* always formatted to two decimals, so zooming into a 0.005 grid      */
+/* printed the same label several times in a row — the axis looked     */
+/* broken and a number could not be read off it.                       */
+/* ------------------------------------------------------------------ */
+
+/** Smallest price increment the instrument actually quotes. */
+export function tickSizeForDecimals(decimals: number): number {
+  // Number('1e-5') is exact where Math.pow(10, -5) is 9.999999999999999e-6,
+  // and that error leaks straight into the grid step and the labels.
+  return Number(`1e-${Math.max(0, Math.round(decimals))}`);
+}
+
+/**
+ * Snap a raw step up to the next "nice" value: 1, 2, 2.5, 5 or 10 times a
+ * power of ten, never finer than one tick. 2.5 is included because MT5 uses
+ * it and it is what makes a 25-pip grid possible.
+ */
+export function niceStep(rawStep: number, minTick = 0): number {
+  if (!Number.isFinite(rawStep) || rawStep <= 0) return Math.max(minTick, 1);
+  const magnitude = Math.pow(10, Math.floor(Math.log10(rawStep)));
+  const normalized = rawStep / magnitude;
+
+  let snapped: number;
+  if (normalized <= 1) snapped = 1;
+  else if (normalized <= 2) snapped = 2;
+  else if (normalized <= 2.5) snapped = 2.5;
+  else if (normalized <= 5) snapped = 5;
+  else snapped = 10;
+
+  return Math.max(snapped * magnitude, minTick);
+}
+
+/**
+ * How many decimals a label needs so that two adjacent grid values never
+ * render as the same string. Capped by the instrument's own precision.
+ */
+export function decimalsForStep(step: number, maxDecimals: number): number {
+  if (!Number.isFinite(step) || step <= 0) return maxDecimals;
+  // Read the digits off the step itself. -log10(step) is not enough: 0.00025
+  // needs five decimals but its logarithm only suggests four.
+  const text = step.toFixed(Math.min(12, Math.max(0, maxDecimals) + 4));
+  const trimmed = text.replace(/0+$/, '');
+  const dot = trimmed.indexOf('.');
+  const needed = dot === -1 ? 0 : trimmed.length - dot - 1;
+  return Math.min(maxDecimals, Math.max(0, needed));
+}
+
+export interface PriceTick {
+  price: number;
+  y: number;
+  label: string;
+  /** Major lines are brighter — every 5th step, as MT5 does. */
+  major: boolean;
+}
+
+/** Build the horizontal price grid for the current viewport. */
+export function buildPriceTicks(
+  box: PlotBox,
+  viewport: ViewportState,
+  options: { decimals: number; targetSpacingPx?: number } = { decimals: 2 },
+): { ticks: PriceTick[]; step: number; labelDecimals: number } {
+  const targetSpacing = options.targetSpacingPx ?? 52;
+  const range = Math.max(viewport.priceMax - viewport.priceMin, 1e-9);
+  const targetSteps = Math.max(2, Math.floor(box.height / targetSpacing));
+  const minTick = tickSizeForDecimals(options.decimals);
+  const step = niceStep(range / targetSteps, minTick);
+  const labelDecimals = decimalsForStep(step, options.decimals);
+
+  const ticks: PriceTick[] = [];
+  const first = Math.ceil(viewport.priceMin / step) * step;
+  // Guard against a pathological step that would spin forever.
+  const maxTicks = 200;
+
+  for (let n = 0; n < maxTicks; n++) {
+    const price = first + n * step;
+    if (price > viewport.priceMax) break;
+    const y = priceToY(price, box, viewport);
+    if (y < box.top - 1 || y > box.top + box.height + 1) continue;
+    // Round to the nearest step to kill floating point drift (…4999999).
+    const snapped = Math.round(price / step) * step;
+    ticks.push({
+      price: snapped,
+      y,
+      label: snapped.toFixed(labelDecimals),
+      major: Math.abs(snapped / step) % 5 < 0.0001,
+    });
+  }
+
+  return { ticks, step, labelDecimals };
+}
+
+export interface TimeTick {
+  logicalIndex: number;
+  x: number;
+  label: string;
+  /** True at a day boundary — MT5 prints the date and a brighter line. */
+  isDayBoundary: boolean;
+}
+
+/**
+ * Build the vertical time grid. Unlike the previous "every Nth array index"
+ * approach this is aware of calendar boundaries, so the axis reads like MT5:
+ * times within a day, and the date wherever the day changes.
+ */
+export function buildTimeTicks(
+  candles: Candle[],
+  box: PlotBox,
+  viewport: ViewportState,
+  options: { minLabelSpacingPx?: number } = {},
+): TimeTick[] {
+  if (candles.length === 0) return [];
+  const minSpacing = options.minLabelSpacingPx ?? 74;
+
+  const firstBar = Math.max(0, Math.floor(viewport.firstLogical) - 1);
+  const lastBar = Math.min(candles.length - 1, Math.ceil(viewport.firstLogical + box.width / viewport.barSpacing) + 1);
+  if (lastBar < firstBar) return [];
+
+  const ticks: TimeTick[] = [];
+  let lastLabelX = -Infinity;
+  let previousDay: string | null = firstBar > 0 ? new Date(candles[firstBar - 1].time).toDateString() : null;
+
+  for (let i = firstBar; i <= lastBar; i++) {
+    const candle = candles[i];
+    if (!candle) continue;
+    const date = new Date(candle.time);
+    const day = date.toDateString();
+    const isDayBoundary = previousDay !== null && day !== previousDay;
+    previousDay = day;
+
+    const x = logicalToX(i, box, viewport);
+    if (x < box.left || x > box.left + box.width) continue;
+
+    // A day boundary always gets a label; regular ticks only when there is
+    // room, so labels never overlap at any zoom level.
+    if (!isDayBoundary && x - lastLabelX < minSpacing) continue;
+
+    ticks.push({
+      logicalIndex: i,
+      x,
+      label: isDayBoundary
+        ? date.toLocaleDateString([], { day: '2-digit', month: 'short' })
+        : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+      isDayBoundary,
+    });
+    lastLabelX = x;
+  }
+
+  return ticks;
+}
+
+/**
+ * Discrete zoom ladder. MT5 zooms in fixed steps rather than continuously,
+ * which is what makes its +/- buttons and keyboard feel predictable.
+ */
+export const ZOOM_LADDER = [1.5, 2.5, 4, 6, 9.5, 14, 20, 28, 38, 50] as const;
+
+export function zoomStep(
+  direction: 1 | -1,
+  box: PlotBox,
+  viewport: ViewportState,
+  anchorX?: number,
+): void {
+  const anchor = anchorX ?? box.left + box.width / 2;
+  const anchorLogical = xToLogical(anchor, box, viewport);
+
+  const current = viewport.barSpacing;
+  let next = current;
+  if (direction > 0) {
+    next = ZOOM_LADDER.find((value) => value > current * 1.001) ?? ZOOM_LADDER[ZOOM_LADDER.length - 1];
+  } else {
+    const below = ZOOM_LADDER.filter((value) => value < current * 0.999);
+    next = below.length > 0 ? below[below.length - 1] : ZOOM_LADDER[0];
+  }
+
+  viewport.barSpacing = Math.max(viewport.minBarSpacing, Math.min(viewport.maxBarSpacing, next));
+  viewport.firstLogical = anchorLogical - (anchor - box.left) / viewport.barSpacing;
+}
+
+export interface MeasureResult {
+  priceDelta: number;
+  percentDelta: number;
+  pips: number;
+  bars: number;
+  milliseconds: number;
+  direction: 'UP' | 'DOWN' | 'FLAT';
+}
+
+/** The numbers MT5 shows while you drag the crosshair between two points. */
+export function measureBetween(
+  from: { price: number; logicalIndex: number; time: number },
+  to: { price: number; logicalIndex: number; time: number },
+  pipMultiplier: number,
+): MeasureResult {
+  const priceDelta = to.price - from.price;
+  return {
+    priceDelta,
+    percentDelta: from.price !== 0 ? (priceDelta / from.price) * 100 : 0,
+    pips: priceDelta * (pipMultiplier || 1),
+    bars: to.logicalIndex - from.logicalIndex,
+    milliseconds: to.time - from.time,
+    direction: priceDelta > 0 ? 'UP' : priceDelta < 0 ? 'DOWN' : 'FLAT',
+  };
+}
+
+/** "2h 15m", "3d 4h", "45m" — compact elapsed-time rendering for the ruler. */
+export function formatDuration(milliseconds: number): string {
+  const abs = Math.abs(milliseconds);
+  const minutes = Math.floor(abs / 60000);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+  if (days > 0) return `${days}d ${hours % 24}h`;
+  if (hours > 0) return `${hours}h ${minutes % 60}m`;
+  return `${minutes}m`;
 }
