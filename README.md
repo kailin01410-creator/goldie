@@ -69,8 +69,38 @@ Create a `.env` file in the root directory (optional):
 ```env
 # Optional GoldAPI.io key for live institutional spot quotes
 GOLDAPI_KEY=
+
+# Optional market-data keys for FX/stock quotes and provider OHLC history.
+# Keys are used only by the backend and are never sent to the browser.
+TWELVE_DATA_API_KEY=
+ALPHA_VANTAGE_API_KEY=
 ```
-If no key is provided, the application automatically uses the live 24/7 physical spot gold feed (PAXG 1:1 allocated gold spot price) with XM broker spread calibration.
+If no key is provided, the application automatically uses the live 24/7 physical spot gold feed (PAXG 1:1 allocated gold spot price) with XM broker spread calibration. Major-FX quotes and historical candles require the optional market-data providers below.
+
+## Optional FX & stock market data
+
+The backend now offers a small multi-provider market-data adapter inspired by the public
+[forex-trading-ai-agent market-data service](https://github.com/Signal-Execution-Labs/forex-trading-ai-agent/blob/main/src/services/market-data.ts):
+
+- **Twelve Data** is tried first for major-FX and stock quotes and is the provider for OHLC history.
+- **Alpha Vantage** is a quote fallback for FX and stocks.
+- Provider keys stay on the server. The browser calls same-origin `/api/market/*` routes; no vendor key is included in client code or API responses.
+- Quotes and candles are cached server-side to reduce free-tier API usage. Free plans can be delayed, rate-limited, or changed by providers; this is not a tick feed and must not be treated as a broker execution price.
+- The FX chart loads provider OHLC history when Twelve Data is configured. Without that key the UI labels its chart candles as synthetic fallback data instead of presenting them as provider history.
+- A free API response is indicative market data only. It does not provide full depth/order flow or guarantee executable bid/ask prices. Paper-trade and verify with your broker before relying on a signal.
+
+Get optional keys from [Twelve Data](https://twelvedata.com/) and [Alpha Vantage](https://www.alphavantage.co/support/#api-key), then add them to the server's `.env` file. Check each provider's current terms and request limits before deployment.
+
+```http
+GET /api/market/status
+GET /api/market/quote?symbol=EUR%2FUSD&assetClass=forex
+GET /api/market/quote?symbol=AAPL&assetClass=stock
+GET /api/market/candles?symbol=EUR%2FUSD&timeframe=5m&limit=200
+```
+
+`/api/market/status` reports configured provider names, never credentials. Quote responses include the provider, timestamp, available bid/ask, and any metrics the source actually supplies; missing fields stay `null` rather than being fabricated. Candle history supports the terminal timeframes and consolidates selected intervals from smaller bars where needed. If no suitable key is configured, quote/history endpoints return an explicit error instead of a mock market price.
+
+Research links: [GitHub free-stock-market-api topic](https://github.com/topics/free-stock-market-api), [stock-sdk](https://github.com/chengzuopeng/stock-sdk) (frontend/Node stock quotes and K-lines; its listed coverage is equities, not FX), [Twelve Data API docs](https://twelvedata.com/docs), and [Alpha Vantage API docs](https://www.alphavantage.co/documentation/). The stock SDK is a useful stock-only option, but the server-side provider adapter keeps this app's FX and stock quote interface in one place.
 
 ---
 
@@ -168,6 +198,10 @@ GEMINI_API_KEY=
 
 # Optional GoldAPI.io key for live institutional spot quotes.
 GOLDAPI_KEY=
+
+# Optional FX/stock quote and candle providers. Backend-only secrets.
+TWELVE_DATA_API_KEY=
+ALPHA_VANTAGE_API_KEY=
 ```
 
 Never commit a real key. If one has already been committed, rotate it with the

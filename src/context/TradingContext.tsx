@@ -117,11 +117,16 @@ interface TradingContextType {
   setTickSpeedMs: (speed: number) => void;
   lastTickTime: number;
 
-  // Real-time Gold & Live Data Integration
+  // Real-time Gold, FX, and provider-backed market data
   goldDataSource: string;
   lastGoldSyncTime: number;
   goldApiKey: string;
   goldApiNotice: string | null;
+  marketDataNotice: string | null;
+  marketQuoteAvailable: boolean;
+  marketQuoteMetricsAvailable: boolean;
+  marketHistorySource: string;
+  marketHistoryNotice: string | null;
   marketStatus: 'OPEN' | 'CLOSED';
   isMarketClosed: boolean;
   marketClosureReason: string | null;
@@ -416,6 +421,11 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   // GoldAPI / Live Data State
   const [goldDataSource, setGoldDataSource] = useState<string>('Live Institutional Spot Feed');
   const [goldApiNotice, setGoldApiNotice] = useState<string | null>(null);
+  const [marketDataNotice, setMarketDataNotice] = useState<string | null>(null);
+  const [marketQuoteAvailable, setMarketQuoteAvailable] = useState(false);
+  const [marketQuoteMetricsAvailable, setMarketQuoteMetricsAvailable] = useState(false);
+  const [marketHistorySource, setMarketHistorySource] = useState<string>('Synthetic fallback candles');
+  const [marketHistoryNotice, setMarketHistoryNotice] = useState<string | null>(null);
   const [lastGoldSyncTime, setLastGoldSyncTime] = useState<number>(Date.now());
   const [marketStatus, setMarketStatus] = useState<'OPEN' | 'CLOSED'>('CLOSED');
   const [marketClosureReason, setMarketClosureReason] = useState<string | null>('Global Weekend Close');
@@ -444,12 +454,18 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [candles, setCandles] = useState<Candle[]>(() => {
     return generateCandles(INITIAL_INSTRUMENTS[0].currentPrice, 200, undefined, '5m');
   });
+  const providerCandlesLoadedRef = useRef(false);
 
-  // Regenerate candles when symbol or timeframe changes
+  // Regenerate candles when symbol or timeframe changes. Provider history
+  // replaces this local fallback as soon as the backend returns real bars.
   const setActiveSymbol = useCallback((symbol: string) => {
     setActiveSymbolState(symbol);
     const target = instruments.find(i => i.symbol === symbol) || instruments[0];
     const effectivePrice = (symbol === activeSymbol && realMarketPriceRef.current) ? realMarketPriceRef.current : target.currentPrice;
+    setMarketDataNotice(null);
+    setMarketQuoteAvailable(false);
+    setMarketQuoteMetricsAvailable(false);
+    providerCandlesLoadedRef.current = false;
     setCandles(generateCandles(effectivePrice, 200, undefined, timeframe));
   }, [instruments, timeframe, activeSymbol]);
 
@@ -458,6 +474,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const nextTf = typeof tfOrUpdater === 'function' ? tfOrUpdater(prevTf) : tfOrUpdater;
       const target = instruments.find(i => i.symbol === activeSymbol) || instruments[0];
       const effectivePrice = realMarketPriceRef.current || target.currentPrice;
+      providerCandlesLoadedRef.current = false;
       setCandles(generateCandles(effectivePrice, 200, undefined, nextTf));
       return nextTf;
     });
@@ -1450,97 +1467,235 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
   }, [handleOfflineDetected, testConnectivity]);
 
-  // Fetch live Gold price from backend proxy (GoldAPI.io + Live Physical Spot + COMEX)
+  // Fetch live metal prices through the gold feed and major-FX quotes through
+  // the optional server-side Twelve Data / Alpha Vantage adapters.
   const refreshGoldPrice = useCallback(async () => {
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       handleOfflineDetected();
       return;
     }
 
+    const isForex = activeInstrument.category === 'FOREX_MAJOR';
     try {
       const headers: Record<string, string> = {};
       const keyToUse = goldApiKey || adminProfile.goldApiKey;
-      if (keyToUse) {
+      if (!isForex && keyToUse) {
         headers['x-access-token'] = keyToUse;
       }
 
       const base = activeInstrument.baseCurrency || 'XAU';
-      const quote = activeInstrument.quoteCurrency || 'USD';
-      const res = await fetch(`/api/gold-price?metal=${encodeURIComponent(base)}&currency=${encodeURIComponent(quote)}&spread=${goldSpreadPips}&t=` + Date.now(), {
-        headers,
-        cache: 'no-store',
-      });
+      const quoteCurrency = activeInstrument.quoteCurrency || 'USD';
+      const url = isForex
+        ? `/api/market/quote?symbol=${encodeURIComponent(activeInstrument.symbol)}&assetClass=forex`
+        : `/api/gold-price?metal=${encodeURIComponent(base)}&currency=${encodeURIComponent(quoteCurrency)}&spread=${goldSpreadPips}&t=${Date.now()}`;
+      const res = await fetch(url, { headers, cache: 'no-store' });
+      const data = await res.json().catch(() => ({}));
 
-      if (res.ok) {
-        const data = await res.json();
-        if (data.marketStatus) {
-          setMarketStatus(data.marketStatus);
-          if (data.marketClosureReason) {
-            setMarketClosureReason(data.marketClosureReason);
-          }
+      if (!res.ok || !data.success) {
+        const notice = data.error || data.message || `Market data request failed (HTTP ${res.status}).`;
+        if (isForex) {
+          setMarketDataNotice(notice);
+          setMarketQuoteAvailable(false);
+          setMarketQuoteMetricsAvailable(false);
+          setGoldDataSource('Live FX quote unavailable');
+        } else if (data.goldApiNotice) {
+          setGoldApiNotice(data.goldApiNotice);
         }
-        if (data.success && (data.rawPrice || data.price)) {
-          // Pure raw market price matching live market settlement strictly
-          const livePrice = Number(data.rawPrice || data.price);
-          realMarketPriceRef.current = livePrice;
-          setInstruments(prev => prev.map(inst => {
-            if (inst.symbol === activeInstrument.symbol) {
-              const newBid = data.bid ? Number(data.bid) : Number((livePrice - 0.20).toFixed(inst.decimals));
-              const newAsk = data.ask ? Number(data.ask) : Number((livePrice + 0.20).toFixed(inst.decimals));
-              const openPrice = data.open24h && Number(data.open24h) > 0
-                ? Number(data.open24h)
-                : (inst.open24h || Number((livePrice * 0.9976).toFixed(inst.decimals)));
-              const finalChangePercent = data.changePercent !== undefined && data.changePercent !== null && Number(data.changePercent) !== 0
-                ? Number(data.changePercent)
-                : Number((((livePrice - openPrice) / openPrice) * 100).toFixed(2));
-              const finalChangePips = data.change !== undefined && data.change !== null && Number(data.change) !== 0
-                ? Number((Number(data.change) * inst.pipMultiplier).toFixed(1))
-                : Number(((livePrice - openPrice) * inst.pipMultiplier).toFixed(1));
-
-              return {
-                ...inst,
-                currentPrice: livePrice,
-                open24h: openPrice,
-                bid: newBid,
-                ask: newAsk,
-                spreadPips: Number(((newAsk - newBid) * inst.pipMultiplier).toFixed(1)),
-                high24h: data.high24h ? Number(data.high24h) : Math.max(inst.high24h, livePrice),
-                low24h: data.low24h ? Number(data.low24h) : Math.min(inst.low24h, livePrice),
-                change24h: finalChangePercent,
-                change24hPips: finalChangePips,
-                tickDirection: livePrice >= inst.currentPrice ? 'UP' : 'DOWN',
-              };
-            }
-            return inst;
-          }));
-
-          setGoldDataSource(data.source || 'Live Institutional Spot Feed');
-          setLastGoldSyncTime(Date.now());
-          if (data.goldApiNotice) {
-            setGoldApiNotice(data.goldApiNotice);
-          } else if (data.goldApiStatus === 'ACTIVE') {
-            setGoldApiNotice(null);
-          }
-
-          // Calibrate candles around active instrument's live price
-          setCandles(prev => {
-            // If empty or if last bar close diverges > 0.5% from real live price, regenerate full 200 bars contiguously
-            if (prev.length === 0 || Math.abs(prev[prev.length - 1].close - livePrice) / livePrice > 0.005) {
-              return generateCandles(livePrice, 200, undefined, timeframe);
-            }
-            const last = { ...prev[prev.length - 1] };
-            last.close = livePrice;
-            last.high = Math.max(last.high, livePrice);
-            last.low = Math.min(last.low, livePrice);
-            last.isBullish = last.close >= last.open;
-            return [...prev.slice(0, -1), last];
-          });
-        }
+        return;
       }
+
+      if (data.marketStatus) {
+        setMarketStatus(data.marketStatus);
+        if (data.marketClosureReason) setMarketClosureReason(data.marketClosureReason);
+      }
+
+      const priceValue = Number(data.rawPrice ?? data.price);
+      if (!Number.isFinite(priceValue) || priceValue <= 0) return;
+      const livePrice = priceValue;
+      realMarketPriceRef.current = livePrice;
+      const openField = Number(data.open24h ?? data.open);
+      const highField = Number(data.high24h ?? data.high);
+      const lowField = Number(data.low24h ?? data.low);
+      const hasDailyMetrics = Number.isFinite(openField) && openField > 0 &&
+        Number.isFinite(highField) && highField > 0 &&
+        Number.isFinite(lowField) && lowField > 0 &&
+        (data.change !== null && data.change !== undefined ||
+          data.changePercent !== null && data.changePercent !== undefined);
+      if (isForex) {
+        setMarketQuoteAvailable(true);
+        setMarketQuoteMetricsAvailable(hasDailyMetrics);
+        setMarketDataNotice(hasDailyMetrics
+          ? null
+          : `${data.source || 'The FX provider'} returned a spot quote, but not a complete daily OHLC/change set.`);
+      }
+
+      setInstruments(prev => prev.map(inst => {
+        if (inst.symbol !== activeInstrument.symbol) return inst;
+
+        const providerBid = Number(data.bid);
+        const providerAsk = Number(data.ask);
+        const hasProviderSpread = Number.isFinite(providerBid) && Number.isFinite(providerAsk) &&
+          providerBid > 0 && providerAsk > providerBid;
+        const fallbackSpread = Math.max(0, inst.spreadPips / Math.max(1, inst.pipMultiplier));
+        const newBid = hasProviderSpread
+          ? providerBid
+          : Number((livePrice - fallbackSpread / 2).toFixed(inst.decimals));
+        const newAsk = hasProviderSpread
+          ? providerAsk
+          : Number((livePrice + fallbackSpread / 2).toFixed(inst.decimals));
+
+        const providerOpen = Number(data.open24h ?? data.open);
+        const openPrice = Number.isFinite(providerOpen) && providerOpen > 0
+          ? providerOpen
+          : (isForex ? livePrice : (inst.open24h && inst.open24h > 0 ? inst.open24h : livePrice));
+        const providerChangePercent = data.changePercent === null || data.changePercent === undefined
+          ? Number.NaN
+          : Number(data.changePercent);
+        const providerChange = data.change === null || data.change === undefined
+          ? Number.NaN
+          : Number(data.change);
+        const finalChangePercent = Number.isFinite(providerChangePercent)
+          ? providerChangePercent
+          : Number.isFinite(providerChange) && openPrice > 0
+            ? Number((((livePrice - openPrice) / openPrice) * 100).toFixed(2))
+            : (isForex ? 0 : inst.change24h);
+        const finalChangePips = Number.isFinite(providerChange)
+          ? Number((providerChange * inst.pipMultiplier).toFixed(1))
+          : Number.isFinite(providerChangePercent) && openPrice > 0
+            ? Number(((openPrice * providerChangePercent / 100) * inst.pipMultiplier).toFixed(1))
+            : (isForex ? 0 : inst.change24hPips);
+
+        const providerHigh = Number(data.high24h ?? data.high);
+        const providerLow = Number(data.low24h ?? data.low);
+        return {
+          ...inst,
+          currentPrice: livePrice,
+          open24h: openPrice,
+          bid: newBid,
+          ask: newAsk,
+          spreadPips: Number(((newAsk - newBid) * inst.pipMultiplier).toFixed(1)),
+          high24h: Number.isFinite(providerHigh) && providerHigh > 0 ? providerHigh : (isForex ? livePrice : inst.high24h),
+          low24h: Number.isFinite(providerLow) && providerLow > 0 ? providerLow : (isForex ? livePrice : inst.low24h),
+          change24h: finalChangePercent,
+          change24hPips: finalChangePips,
+          tickDirection: livePrice > inst.currentPrice ? 'UP' : livePrice < inst.currentPrice ? 'DOWN' : 'EQUAL',
+        };
+      }));
+
+      setGoldDataSource(data.source || (isForex ? 'Market data provider' : 'Live Institutional Spot Feed'));
+      setLastGoldSyncTime(Date.now());
+      if (isForex) {
+        setGoldApiNotice(null);
+      } else if (data.goldApiNotice) {
+        setGoldApiNotice(data.goldApiNotice);
+      } else if (data.goldApiStatus === 'ACTIVE') {
+        setGoldApiNotice(null);
+      }
+
+      // Keep a provider-backed bar anchored to the latest quote. Synthetic bars
+      // are only regenerated when no historical candles have loaded yet.
+      setCandles(prev => {
+        if (prev.length === 0 || (!providerCandlesLoadedRef.current &&
+          Math.abs(prev[prev.length - 1].close - livePrice) / livePrice > 0.005)) {
+          return generateCandles(livePrice, 200, undefined, timeframe);
+        }
+        const last = { ...prev[prev.length - 1] };
+        last.close = livePrice;
+        last.high = Math.max(last.high, livePrice);
+        last.low = Math.min(last.low, livePrice);
+        last.isBullish = last.close >= last.open;
+        return [...prev.slice(0, -1), last];
+      });
     } catch (err) {
-      console.warn('Live gold price fetch notice:', err);
+      const message = err instanceof Error ? err.message : 'Market data connection failed.';
+      if (isForex) setMarketDataNotice(message);
+      console.warn('Live market price fetch notice:', err);
     }
-  }, [goldApiKey, adminProfile.goldApiKey, handleOfflineDetected, activeSymbol, timeframe, goldSpreadPips]);
+  }, [
+    goldApiKey,
+    adminProfile.goldApiKey,
+    handleOfflineDetected,
+    activeSymbol,
+    activeInstrument.category,
+    activeInstrument.symbol,
+    activeInstrument.baseCurrency,
+    activeInstrument.quoteCurrency,
+    activeInstrument.decimals,
+    activeInstrument.pipMultiplier,
+    activeInstrument.spreadPips,
+    timeframe,
+    goldSpreadPips,
+  ]);
+
+  // Load real OHLC history for FX and metals when available. The server caches
+  // bars, so this client-side refresh does not consume provider credits per tick.
+  useEffect(() => {
+    const supportedCategory = activeInstrument.category === 'FOREX_MAJOR' || activeInstrument.category === 'METALS';
+    if (!supportedCategory) {
+      providerCandlesLoadedRef.current = false;
+      setMarketHistorySource('Synthetic fallback candles');
+      setMarketHistoryNotice(null);
+      return;
+    }
+
+    let alive = true;
+    let loading = false;
+    const controller = new AbortController();
+    providerCandlesLoadedRef.current = false;
+    setMarketHistorySource('Loading provider candles…');
+    setMarketHistoryNotice(null);
+
+    const loadHistory = async () => {
+      if (loading) return;
+      loading = true;
+      try {
+        const url = `/api/market/candles?symbol=${encodeURIComponent(activeInstrument.symbol)}&timeframe=${encodeURIComponent(timeframe)}&limit=200`;
+        const res = await fetch(url, { cache: 'no-store', signal: controller.signal });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.success || !Array.isArray(data.candles)) {
+          throw new Error(data.error || `Historical candles unavailable (HTTP ${res.status}).`);
+        }
+        const providerBars: Candle[] = data.candles.filter((bar: any) =>
+          Number.isFinite(Number(bar.time)) &&
+          Number.isFinite(Number(bar.open)) &&
+          Number.isFinite(Number(bar.high)) &&
+          Number.isFinite(Number(bar.low)) &&
+          Number.isFinite(Number(bar.close))
+        ).map((bar: any) => ({
+          time: Number(bar.time),
+          open: Number(bar.open),
+          high: Number(bar.high),
+          low: Number(bar.low),
+          close: Number(bar.close),
+          volume: Number.isFinite(Number(bar.volume)) ? Number(bar.volume) : 0,
+          isBullish: Number(bar.close) >= Number(bar.open),
+          isComplete: Boolean(bar.isComplete),
+        }));
+        if (providerBars.length === 0) throw new Error('The provider returned no valid historical bars.');
+        if (!alive) return;
+
+        providerCandlesLoadedRef.current = true;
+        setCandles(providerBars);
+        setMarketHistorySource(`${data.source || 'Market provider'} OHLC`);
+        setMarketHistoryNotice(null);
+      } catch (error) {
+        if (!alive || controller.signal.aborted) return;
+        providerCandlesLoadedRef.current = false;
+        setMarketHistorySource('Synthetic fallback candles');
+        setMarketHistoryNotice(error instanceof Error ? error.message : 'Historical market data is unavailable.');
+      } finally {
+        loading = false;
+      }
+    };
+
+    void loadHistory();
+    const interval = setInterval(loadHistory, 60_000);
+    return () => {
+      alive = false;
+      clearInterval(interval);
+      controller.abort();
+    };
+  }, [activeInstrument.category, activeInstrument.symbol, timeframe]);
 
   // Test GoldAPI key directly and return diagnostic payload
   const testGoldApiKey = useCallback(async (keyToCheck?: string) => {
@@ -1625,15 +1780,17 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [goldSpreadPips, activeSymbol, timeframe]);
 
-  // Initial and periodic price fetch
+  // Gold's no-key feed is polled frequently; free FX quote APIs are polled
+  // less often and server-cached to avoid burning through provider quotas.
   useEffect(() => {
     refreshGoldPrice();
+    const pollInterval = activeInstrument.category === 'FOREX_MAJOR' ? 60_000 : 2500;
     const interval = setInterval(() => {
       refreshGoldPrice();
-    }, 2500); // sync real live spot every 2.5s
+    }, pollInterval);
 
     return () => clearInterval(interval);
-  }, [refreshGoldPrice]);
+  }, [refreshGoldPrice, activeInstrument.category]);
 
   // Update risk settings
   const updateAdminRiskSettings = useCallback((settings: Partial<AdminProfile>) => {
@@ -2085,6 +2242,11 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     lastTickTime,
     goldDataSource,
     goldApiNotice,
+    marketDataNotice,
+    marketQuoteAvailable,
+    marketQuoteMetricsAvailable,
+    marketHistorySource,
+    marketHistoryNotice,
     lastGoldSyncTime,
     marketStatus,
     isMarketClosed: isMarketClosedEffective,
