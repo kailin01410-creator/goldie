@@ -7,6 +7,7 @@ import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import * as archiver from 'archiver';
 import JSZip from 'jszip';
+import { MarketDataError, marketDataService } from './src/server/marketData';
 
 // `archiver` is CommonJS and exposes the constructor as a named property.
 // This used to go through createRequire(import.meta.url), which esbuild
@@ -87,6 +88,47 @@ app.get('/api/health', (_req, res) => {
 
 app.get('/api/ping', (_req, res) => {
   res.json({ status: 'pong', online: true, serverTime: new Date().toISOString() });
+});
+
+// Optional multi-asset quote/history API. Provider keys stay on the server;
+// the browser only talks to these same-origin routes.
+app.get('/api/market/status', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(marketDataService.getStatus());
+});
+
+app.get('/api/market/quote', async (req, res) => {
+  try {
+    const quote = await marketDataService.getQuote(req.query.symbol, req.query.assetClass);
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ success: true, ...quote });
+  } catch (error) {
+    const knownError = error instanceof MarketDataError ? error : null;
+    return res.status(knownError?.statusCode ?? 502).json({
+      success: false,
+      code: knownError?.code ?? 'UPSTREAM_UNAVAILABLE',
+      error: knownError?.message ?? 'Market data is temporarily unavailable.',
+    });
+  }
+});
+
+app.get('/api/market/candles', async (req, res) => {
+  try {
+    const history = await marketDataService.getCandles(
+      req.query.symbol,
+      req.query.timeframe,
+      req.query.limit
+    );
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ success: true, ...history });
+  } catch (error) {
+    const knownError = error instanceof MarketDataError ? error : null;
+    return res.status(knownError?.statusCode ?? 502).json({
+      success: false,
+      code: knownError?.code ?? 'UPSTREAM_UNAVAILABLE',
+      error: knownError?.message ?? 'Market candle history is temporarily unavailable.',
+    });
+  }
 });
 
 // Market hours utility: detects global market closure (Friday 21:00 UTC to Sunday 22:00 UTC)

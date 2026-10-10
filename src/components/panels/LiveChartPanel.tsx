@@ -16,12 +16,20 @@ export const LiveChartPanel: React.FC = () => {
     isMarketClosed,
     goldApiKey,
     goldApiNotice,
+    marketDataNotice,
+    marketQuoteAvailable,
+    marketQuoteMetricsAvailable,
     setIsPriceAlertModalOpen,
     lastTickTime,
     lastGoldSyncTime,
     goldSpreadPips
   } = useTrading();
 
+  const isFxInstrument = activeInstrument.category === 'FOREX_MAJOR';
+  const hasLiveQuote = !isFxInstrument || marketQuoteAvailable;
+  const hasDailyMetrics = !isFxInstrument || marketQuoteMetricsAvailable;
+  const quoteCurrency = activeInstrument.quoteCurrency || 'USD';
+  const hasQuoteWarning = isFxInstrument && (!marketQuoteAvailable || Boolean(marketDataNotice));
   const isUp = activeInstrument.change24h >= 0;
 
   return (
@@ -35,7 +43,7 @@ export const LiveChartPanel: React.FC = () => {
           </div>
           <div>
             <h2 className="text-base sm:text-lg font-bold text-white tracking-wide flex items-center gap-2">
-              <span>Panel 1: Live Gold Price Chart</span>
+              <span>Panel 1: {activeInstrument.category === 'METALS' ? 'Live Gold Price Chart' : 'Live Market Chart'}</span>
               <span className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-cyan-500/10 border border-cyan-500/30 text-cyan-400">
                 MT5 & TradingView Fluid Core
               </span>
@@ -50,9 +58,9 @@ export const LiveChartPanel: React.FC = () => {
         <div className="flex items-center gap-2">
           {/* Feed Tag */}
           <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#090E17] border border-[#1E2638] text-xs font-mono">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-            <span className="text-slate-300">
-              {goldDataSource.includes('GoldAPI') ? 'GoldAPI.io Official Feed' : 'Live Institutional Spot'}
+            <span className={`w-2 h-2 rounded-full ${hasLiveQuote ? 'bg-emerald-400 animate-ping' : 'bg-amber-400'}`} />
+            <span className="text-slate-300" title={goldDataSource}>
+              {goldDataSource}
             </span>
           </div>
 
@@ -84,8 +92,8 @@ export const LiveChartPanel: React.FC = () => {
         const currentPrice = activeInstrument.currentPrice || 4193.35;
         const decimals = activeInstrument.decimals ?? 2;
         const openPrice = activeInstrument.open24h && activeInstrument.open24h > 0
-          ? activeInstrument.open24h 
-          : Number((currentPrice * 0.9976).toFixed(decimals));
+          ? activeInstrument.open24h
+          : currentPrice;
         
         const changeDollars = currentPrice - openPrice;
         const changePct = activeInstrument.change24h !== undefined && activeInstrument.change24h !== null && activeInstrument.change24h !== 0
@@ -95,13 +103,14 @@ export const LiveChartPanel: React.FC = () => {
           ? Number(activeInstrument.change24hPips)
           : Number((changeDollars * (activeInstrument.pipMultiplier || 10)).toFixed(1));
 
-        const high24h = Math.max(activeInstrument.high24h || 0, currentPrice, Number((openPrice * 1.006).toFixed(decimals)));
-        const low24h = Math.min(activeInstrument.low24h || currentPrice, currentPrice, Number((openPrice * 0.994).toFixed(decimals)));
+        const high24h = hasDailyMetrics ? Math.max(activeInstrument.high24h || currentPrice, currentPrice) : currentPrice;
+        const low24h = hasDailyMetrics ? Math.min(activeInstrument.low24h || currentPrice, currentPrice) : currentPrice;
         const isBullish = changeDollars >= 0;
 
-        const bidPrice = activeInstrument.bid || Number((currentPrice - 0.20).toFixed(decimals));
-        const askPrice = activeInstrument.ask || Number((currentPrice + 0.20).toFixed(decimals));
-        const spreadDollars = Math.max(0.10, Math.abs(askPrice - bidPrice));
+        const fallbackSpread = Math.max(0, activeInstrument.spreadPips / Math.max(1, activeInstrument.pipMultiplier));
+        const bidPrice = activeInstrument.bid || Number((currentPrice - fallbackSpread / 2).toFixed(decimals));
+        const askPrice = activeInstrument.ask || Number((currentPrice + fallbackSpread / 2).toFixed(decimals));
+        const spreadDollars = Math.abs(askPrice - bidPrice);
         const spreadPips = Number((spreadDollars * (activeInstrument.pipMultiplier || 10)).toFixed(1));
 
         const rangeTotal = Math.max(high24h - low24h, 1.0);
@@ -117,28 +126,28 @@ export const LiveChartPanel: React.FC = () => {
               </div>
               <div className="flex items-baseline gap-1 mt-0.5">
                 <span className={`text-base sm:text-lg font-extrabold ${isBullish ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  ${currentPrice.toFixed(decimals)}
+                  {hasLiveQuote ? `${quoteCurrency} ${currentPrice.toFixed(decimals)}` : '—'}
                 </span>
                 <span className={`text-xs font-bold ${isBullish ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {isBullish ? '▲' : '▼'}
+                  {hasDailyMetrics ? (isBullish ? '▲' : '▼') : '–'}
                 </span>
               </div>
               <span className="text-[10px] text-slate-500 block truncate">
-                Tick: {activeInstrument.tickDirection || 'UP'} • 1 Pip = $0.10
+                Tick: {hasLiveQuote ? activeInstrument.tickDirection : '—'} • {quoteCurrency} quote
               </span>
             </div>
 
             {/* 2. Net Change ($ / % / Pips) */}
             <div>
-              <span className="text-slate-400 text-[10px] block font-semibold">NET CHANGE ($ / %)</span>
+              <span className="text-slate-400 text-[10px] block font-semibold">DAILY CHANGE ({quoteCurrency} / %)</span>
               <div className={`font-bold flex items-baseline gap-1 mt-0.5 ${isBullish ? 'text-emerald-400' : 'text-rose-400'}`}>
-                <span className="text-sm">{isBullish ? '+' : ''}${Math.abs(changeDollars).toFixed(2)}</span>
+                <span className="text-sm">{hasDailyMetrics ? `${isBullish ? '+' : ''}${quoteCurrency} ${Math.abs(changeDollars).toFixed(2)}` : '—'}</span>
                 <span className="text-[11px] px-1 rounded bg-slate-800/80 border border-slate-700/50">
-                  {isBullish ? '+' : ''}{changePct.toFixed(2)}%
+                  {hasDailyMetrics ? `${isBullish ? '+' : ''}${changePct.toFixed(2)}%` : '—'}
                 </span>
               </div>
               <span className={`text-[10px] font-semibold block ${isBullish ? 'text-emerald-400/90' : 'text-rose-400/90'}`}>
-                {isBullish ? '+' : ''}{changePips.toFixed(1)} Pips
+                {hasDailyMetrics ? `${isBullish ? '+' : ''}${changePips.toFixed(1)} Pips` : 'Daily change unavailable'}
               </span>
             </div>
 
@@ -146,15 +155,15 @@ export const LiveChartPanel: React.FC = () => {
             <div>
               <div className="flex items-center justify-between">
                 <span className="text-slate-400 text-[10px] block font-semibold">BID / ASK & SPREAD</span>
-                <span className="text-[9px] text-cyan-400 font-bold">{spreadPips.toFixed(1)} Pips</span>
+                <span className="text-[9px] text-cyan-400 font-bold">{hasLiveQuote ? `${spreadPips.toFixed(1)} Pips` : '—'}</span>
               </div>
               <div className="flex items-baseline justify-between mt-0.5 text-[11px]">
-                <span className="text-emerald-400 font-bold">${bidPrice.toFixed(decimals)}</span>
+                <span className="text-emerald-400 font-bold">{hasLiveQuote ? `${quoteCurrency} ${bidPrice.toFixed(decimals)}` : '—'}</span>
                 <span className="text-slate-500 font-normal">/</span>
-                <span className="text-rose-400 font-bold">${askPrice.toFixed(decimals)}</span>
+                <span className="text-rose-400 font-bold">{hasLiveQuote ? `${quoteCurrency} ${askPrice.toFixed(decimals)}` : '—'}</span>
               </div>
               <span className="text-[10px] text-slate-400 block mt-0.5">
-                Broker Spread: ${spreadDollars.toFixed(2)} / oz
+                {hasLiveQuote ? `Broker spread model: ${quoteCurrency} ${spreadDollars.toFixed(decimals)}` : 'Spread unavailable'}
               </span>
             </div>
 
@@ -162,11 +171,11 @@ export const LiveChartPanel: React.FC = () => {
             <div>
               <div className="flex items-center justify-between">
                 <span className="text-slate-400 text-[10px] block font-semibold">24H HIGH / LOW</span>
-                <span className="text-[9px] text-slate-400">Position: {rangeProgress.toFixed(0)}%</span>
+                <span className="text-[9px] text-slate-400">Position: {hasDailyMetrics ? `${rangeProgress.toFixed(0)}%` : '—'}</span>
               </div>
               <div className="flex items-baseline justify-between mt-0.5 text-[11px] text-slate-200">
-                <span className="font-bold text-emerald-400/90">H: ${high24h.toFixed(decimals)}</span>
-                <span className="font-bold text-rose-400/90">L: ${low24h.toFixed(decimals)}</span>
+                <span className="font-bold text-emerald-400/90">H: {hasDailyMetrics ? `${quoteCurrency} ${high24h.toFixed(decimals)}` : '—'}</span>
+                <span className="font-bold text-rose-400/90">L: {hasDailyMetrics ? `${quoteCurrency} ${low24h.toFixed(decimals)}` : '—'}</span>
               </div>
               {/* Mini Range Bar */}
               <div className="w-full bg-[#151D2C] h-1.5 rounded-full overflow-hidden mt-1 relative">
@@ -182,11 +191,11 @@ export const LiveChartPanel: React.FC = () => {
               <span className="text-slate-400 text-[10px] block font-semibold">24H OPEN & RANGE</span>
               <div className="flex items-baseline gap-1 mt-0.5">
                 <span className="text-slate-200 font-bold text-sm">
-                  ${openPrice.toFixed(decimals)}
+                  {hasDailyMetrics ? `${quoteCurrency} ${openPrice.toFixed(decimals)}` : '—'}
                 </span>
               </div>
               <span className="text-[10px] text-slate-400 block">
-                Total Range: ${(high24h - low24h).toFixed(2)} ({((high24h - low24h) * (activeInstrument.pipMultiplier || 10)).toFixed(0)} Pips)
+                {hasDailyMetrics ? `Daily range: ${quoteCurrency} ${(high24h - low24h).toFixed(decimals)} (${((high24h - low24h) * (activeInstrument.pipMultiplier || 10)).toFixed(0)} pips)` : 'Daily range unavailable'}
               </span>
             </div>
 
@@ -194,13 +203,13 @@ export const LiveChartPanel: React.FC = () => {
             <div>
               <span className="text-slate-400 text-[10px] block font-semibold">DATA FEED STATUS</span>
               <div className="flex items-center gap-1.5 pt-0.5">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
-                <span className="text-emerald-400 font-bold text-[11px] truncate block" title={goldDataSource}>
-                  LIVE STREAMING
+                <span className={`w-2 h-2 rounded-full shrink-0 ${hasQuoteWarning ? 'bg-amber-400' : 'bg-emerald-400 animate-pulse'}`} />
+                <span className={`font-bold text-[11px] truncate block ${hasQuoteWarning ? 'text-amber-300' : 'text-emerald-400'}`} title={goldDataSource}>
+                  {isFxInstrument && !marketQuoteAvailable ? 'QUOTE UNAVAILABLE' : hasQuoteWarning ? 'LIMITED METRICS' : 'PROVIDER QUOTE'}
                 </span>
               </div>
               <span className="text-[10px] text-slate-400 truncate block mt-0.5" title={goldDataSource}>
-                {goldDataSource.includes('GoldAPI') ? 'GoldAPI Direct' : 'Institutional Spot'} • Latency &lt; 250ms
+                Source: {goldDataSource}
               </span>
             </div>
           </div>

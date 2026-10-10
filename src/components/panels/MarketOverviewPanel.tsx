@@ -20,12 +20,21 @@ export const MarketOverviewPanel: React.FC = () => {
     candles, 
     goldDataSource, 
     lastGoldSyncTime,
+    marketDataNotice,
+    marketQuoteAvailable,
+    marketQuoteMetricsAvailable,
+    marketHistorySource,
+    marketHistoryNotice,
     isMarketClosed,
     marketClosureReason,
     setIsPriceAlertModalOpen
   } = useTrading();
 
   // Price calculations
+  const isFxInstrument = activeInstrument.category === 'FOREX_MAJOR';
+  const hasLiveQuote = !isFxInstrument || marketQuoteAvailable;
+  const hasDailyMetrics = !isFxInstrument || marketQuoteMetricsAvailable;
+  const quoteCurrency = activeInstrument.quoteCurrency || 'USD';
   const isUp = activeInstrument.change24h >= 0;
   const changeDollars = activeInstrument.currentPrice - (activeInstrument.open24h || activeInstrument.currentPrice);
   const spreadRange = activeInstrument.high24h - activeInstrument.low24h;
@@ -61,7 +70,7 @@ export const MarketOverviewPanel: React.FC = () => {
               <span>MARKET OVERVIEW</span>
               <span className="text-[10px] text-slate-400 font-sans font-normal">({activeInstrument.symbol})</span>
             </h2>
-            <p className="text-[11px] text-slate-400">Institutional bullion price metrics & volatility analytics</p>
+            <p className="text-[11px] text-slate-400">Live spot pricing metrics & volatility analytics</p>
           </div>
         </div>
 
@@ -69,6 +78,22 @@ export const MarketOverviewPanel: React.FC = () => {
           <Clock className="w-3.5 h-3.5 text-slate-400" />
           <span>Last Sync: {formattedSync}</span>
         </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 mb-3 text-[10px] font-mono">
+        <span className="rounded-md bg-[#090E17] border border-[#1A2234] px-2 py-1 text-slate-400">
+          Candle history: <strong className="text-cyan-300">{marketHistorySource}</strong>
+        </span>
+        {marketDataNotice && isFxInstrument && (
+          <span role="status" className="rounded-md bg-amber-500/10 border border-amber-500/30 px-2 py-1 text-amber-200">
+            {marketQuoteAvailable ? 'FX provider notice' : 'FX quote unavailable'}: {marketDataNotice}
+          </span>
+        )}
+        {marketHistoryNotice && (
+          <span role="status" className="rounded-md bg-amber-500/10 border border-amber-500/30 px-2 py-1 text-amber-200">
+            {marketHistoryNotice} Chart indicators use the synthetic fallback until provider history loads.
+          </span>
+        )}
       </div>
 
       {/* Grid of Metric Cards */}
@@ -92,7 +117,7 @@ export const MarketOverviewPanel: React.FC = () => {
             </div>
           </div>
           <div className="text-xl font-extrabold font-mono text-white tracking-tight">
-            ${activeInstrument.currentPrice.toFixed(activeInstrument.decimals)}
+            {hasLiveQuote ? `${quoteCurrency} ${activeInstrument.currentPrice.toFixed(activeInstrument.decimals)}` : '—'}
           </div>
           <div className="text-[11px] text-slate-400 mt-1 flex items-center gap-1 font-mono">
             <span>Base: {activeInstrument.baseCurrency}</span>
@@ -111,19 +136,19 @@ export const MarketOverviewPanel: React.FC = () => {
             <div>
               <span className="text-[10px] text-slate-500 block">HIGH</span>
               <span className="text-sm font-bold text-emerald-400">
-                ${activeInstrument.high24h.toFixed(activeInstrument.decimals)}
+                {hasDailyMetrics ? `${quoteCurrency} ${activeInstrument.high24h.toFixed(activeInstrument.decimals)}` : '—'}
               </span>
             </div>
             <div className="w-px h-6 bg-[#1F293D]" />
             <div className="text-right">
               <span className="text-[10px] text-slate-500 block">LOW</span>
               <span className="text-sm font-bold text-rose-400">
-                ${activeInstrument.low24h.toFixed(activeInstrument.decimals)}
+                {hasDailyMetrics ? `${quoteCurrency} ${activeInstrument.low24h.toFixed(activeInstrument.decimals)}` : '—'}
               </span>
             </div>
           </div>
           <div className="text-[10px] text-slate-400 mt-1 font-mono">
-            Range Spread: ${spreadRange.toFixed(2)}
+            Range Spread: {hasDailyMetrics ? `${quoteCurrency} ${spreadRange.toFixed(2)}` : '—'}
           </div>
         </div>
 
@@ -131,7 +156,9 @@ export const MarketOverviewPanel: React.FC = () => {
         <div className="p-3.5 rounded-xl bg-[#090E17] border border-[#1A2234] flex flex-col justify-between">
           <div className="flex items-center justify-between text-slate-400 text-xs font-mono mb-1">
             <span>DAILY CHANGE</span>
-            {isUp ? (
+            {!hasDailyMetrics ? (
+              <Minus className="w-3.5 h-3.5 text-slate-500" />
+            ) : isUp ? (
               <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
             ) : (
               <TrendingDown className="w-3.5 h-3.5 text-rose-400" />
@@ -139,16 +166,16 @@ export const MarketOverviewPanel: React.FC = () => {
           </div>
           <div className="flex items-baseline gap-2 font-mono">
             <span className={`text-xl font-extrabold ${isUp ? 'text-emerald-400' : 'text-rose-400'}`}>
-              {isUp ? '+' : ''}${Math.abs(changeDollars).toFixed(2)}
+              {hasDailyMetrics ? `${isUp ? '+' : ''}${quoteCurrency} ${Math.abs(changeDollars).toFixed(2)}` : '—'}
             </span>
             <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${
               isUp ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
             }`}>
-              {isUp ? '+' : ''}{activeInstrument.change24h}%
+              {hasDailyMetrics ? `${isUp ? '+' : ''}${activeInstrument.change24h}%` : '—'}
             </span>
           </div>
           <div className="text-[10px] text-slate-400 mt-1 font-mono">
-            Open: ${(activeInstrument.open24h || activeInstrument.currentPrice).toFixed(2)}
+            Open: {hasDailyMetrics ? `${quoteCurrency} ${(activeInstrument.open24h || activeInstrument.currentPrice).toFixed(activeInstrument.decimals)}` : '—'}
           </div>
         </div>
 
@@ -162,7 +189,7 @@ export const MarketOverviewPanel: React.FC = () => {
             {atrResult.enoughData ? (
               <>
                 <span className="text-xl font-extrabold text-white">
-                  ${atrResult.atr.toFixed(2)}
+                  {quoteCurrency} {atrResult.atr.toFixed(activeInstrument.decimals)}
                 </span>
                 <span className="text-xs text-amber-300 bg-amber-500/15 px-1.5 py-0.5 rounded font-bold">
                   {(atrResult.atr * activeInstrument.pipMultiplier).toFixed(0)} pips
