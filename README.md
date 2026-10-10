@@ -135,7 +135,7 @@ GET    /api/angel/code-scan              static scan results
 ### Storage
 
 Documents and conversation turns are persisted on the server under
-`data/angel-store/` (override with `ANGEL_DATA_DIR`). That directory is
+`data/angel-store/`. That directory is
 git-ignored. The browser keeps a lightweight index for instant loading;
 the server copy is authoritative, which is why a chat request no longer has
 to carry your whole corpus in its body.
@@ -165,13 +165,6 @@ Copy `.env.example` to `.env`:
 # calculations and document retrieval through its offline core.
 # Get one at https://aistudio.google.com/apikey
 GEMINI_API_KEY=
-
-# Optional: pin a specific model. Leave empty to let the router pick the best
-# available one and fail over automatically.
-ANGEL_MODEL=
-
-# Optional: where ANGEL persists documents and conversations.
-ANGEL_DATA_DIR=data/angel-store
 
 # Optional GoldAPI.io key for live institutional spot quotes.
 GOLDAPI_KEY=

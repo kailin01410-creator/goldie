@@ -364,7 +364,7 @@ const CHECKS: { id: string; run: CheckFunction }[] = [
           severity: 'CRITICAL' as const,
           detail: `Cannot write to the store directory: ${(error as Error).message}`,
           location: stats.root,
-          remediation: 'Fix the directory permissions, or set ANGEL_DATA_DIR to a writable path. Without this, uploads will not survive a restart.',
+          remediation: 'Fix the store directory permissions so it is writable. Without this, uploads will not survive a restart.',
         };
       }
     },

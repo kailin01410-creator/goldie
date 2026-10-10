@@ -718,7 +718,7 @@ function getGeminiAiClient(): GoogleGenAI | null {
   return geminiAiClient;
 }
 
-const angelStore = getStore(process.env.ANGEL_DATA_DIR || path.join(process.cwd(), 'data', 'angel-store'));
+const angelStore = getStore(path.join(process.cwd(), 'data', 'angel-store'));
 
 /** Server documents rendered in the shape the retrieval layer expects. */
 function serverMemories(): MemoryLike[] {
@@ -1719,7 +1719,7 @@ function promptUser() {
         const { GoogleGenAI } = require('@google/genai');
         const ai = new GoogleGenAI({ apiKey });
         const res = await ai.models.generateContent({
-          model: process.env.ANGEL_MODEL || 'gemini-2.5-flash',
+          model: 'gemini-2.5-flash',
           contents: trimmed,
           config: { systemInstruction: 'You are ANGEL, the user\\x27s devoted AI companion and gold trading partner.' }
         });
